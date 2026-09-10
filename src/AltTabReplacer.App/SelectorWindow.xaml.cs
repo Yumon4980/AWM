@@ -466,8 +466,8 @@ public partial class SelectorWindow : Window
             {
                 Source = icon,
                 Stretch = Stretch.Uniform,
-                Width = 96,
-                Height = 96,
+                Width = 64,
+                Height = 64,
                 HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
                 VerticalAlignment = System.Windows.VerticalAlignment.Center,
             });
