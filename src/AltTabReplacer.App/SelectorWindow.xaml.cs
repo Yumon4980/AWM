@@ -383,13 +383,13 @@ public partial class SelectorWindow : Window
             ShowActivated = false,
             IsHitTestVisible = false,
             Focusable = false,
-            Width = 80, Height = 80,   // 整个 ghost 窗口 80x80（只显示图标，不带标题）
+            Width = 240, Height = 56,   // 240x56：32 图标 + 标题行
             Content = border,
         };
         var sp = System.Windows.Forms.Cursor.Position;
         var (dipX, dipY) = ScreenPxToDip(sp);
-        _ghostWindow.Left = dipX - 40;   // 半宽
-        _ghostWindow.Top = dipY - 40;    // 半高
+        _ghostWindow.Left = dipX - 120;  // 半宽
+        _ghostWindow.Top = dipY - 28;    // 半高
         _ghostWindow.Show();
         StartDragFollowTimer();
     }
@@ -399,8 +399,8 @@ public partial class SelectorWindow : Window
         if (_ghostWindow == null) return;
         var sp = System.Windows.Forms.Cursor.Position;
         var (dipX, dipY) = ScreenPxToDip(sp);
-        _ghostWindow.Left = dipX - 40;
-        _ghostWindow.Top  = dipY - 40;
+        _ghostWindow.Left = dipX - 120;
+        _ghostWindow.Top  = dipY - 28;
     }
 
     private (double x, double y) ScreenPxToDip(System.Drawing.Point sp)
@@ -444,38 +444,67 @@ public partial class SelectorWindow : Window
 
     private static Border BuildGhostContent(WindowCellViewModel cell)
     {
-        // 80x80 的小方块：背景 + 边框 + 居中图标，无标题
+        // 240x56：左侧 32x32 图标 + 右侧标题
         var border = new Border
         {
-            CornerRadius = new CornerRadius(8),
+            CornerRadius = new CornerRadius(6),
             Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(30, 30, 30)),
             BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 212)),
-            BorderThickness = new Thickness(2),
+            BorderThickness = new Thickness(1.5),
             Effect = new DropShadowEffect
             {
-                BlurRadius = 12, Opacity = 0.6, ShadowDepth = 4, Color = Colors.Black,
+                BlurRadius = 10, Opacity = 0.6, ShadowDepth = 3, Color = Colors.Black,
             },
         };
-        if (cell.Icon is BitmapSource icon)
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(48) });             // 图标列
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });  // 标题列（填满）
+
+        // 图标
+        var icon = new System.Windows.Controls.Image
         {
-            border.Child = new System.Windows.Controls.Image
-            {
-                Source = icon,
-                Stretch = Stretch.Uniform,
-                Margin = new Thickness(10),
-            };
-        }
-        else
+            Source = cell.Icon,
+            Stretch = Stretch.Uniform,
+            Width = 32,
+            Height = 32,
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
+            VerticalAlignment = System.Windows.VerticalAlignment.Center,
+        };
+        if (cell.Icon == null)
         {
-            border.Child = new TextBlock
+            // fallback：? 占位
+            var ph = new TextBlock
             {
                 Text = "?",
                 Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(136, 136, 136)),
-                FontSize = 24,
+                FontSize = 18,
                 HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
                 VerticalAlignment = System.Windows.VerticalAlignment.Center,
             };
+            Grid.SetColumn(ph, 0);
+            grid.Children.Add(ph);
         }
+        else
+        {
+            Grid.SetColumn(icon, 0);
+            grid.Children.Add(icon);
+        }
+
+        // 标题
+        var title = new TextBlock
+        {
+            Text = cell.Title,
+            Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(221, 221, 221)),
+            FontSize = 12,
+            VerticalAlignment = System.Windows.VerticalAlignment.Center,
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Left,
+            Margin = new Thickness(8, 0, 8, 0),
+            TextTrimming = TextTrimming.CharacterEllipsis,
+        };
+        Grid.SetColumn(title, 1);
+        grid.Children.Add(title);
+
+        border.Child = grid;
         return border;
     }
 
