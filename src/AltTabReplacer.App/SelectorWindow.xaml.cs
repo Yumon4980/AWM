@@ -383,13 +383,13 @@ public partial class SelectorWindow : Window
             ShowActivated = false,
             IsHitTestVisible = false,
             Focusable = false,
-            Width = 256, Height = 180,
+            Width = 80, Height = 80,   // 整个 ghost 窗口 80x80（只显示图标，不带标题）
             Content = border,
         };
         var sp = System.Windows.Forms.Cursor.Position;
         var (dipX, dipY) = ScreenPxToDip(sp);
-        _ghostWindow.Left = dipX - 128;
-        _ghostWindow.Top = dipY - 90;
+        _ghostWindow.Left = dipX - 40;   // 半宽
+        _ghostWindow.Top = dipY - 40;    // 半高
         _ghostWindow.Show();
         StartDragFollowTimer();
     }
@@ -399,8 +399,8 @@ public partial class SelectorWindow : Window
         if (_ghostWindow == null) return;
         var sp = System.Windows.Forms.Cursor.Position;
         var (dipX, dipY) = ScreenPxToDip(sp);
-        _ghostWindow.Left = dipX - 128;
-        _ghostWindow.Top  = dipY - 90;
+        _ghostWindow.Left = dipX - 40;
+        _ghostWindow.Top  = dipY - 40;
     }
 
     private (double x, double y) ScreenPxToDip(System.Drawing.Point sp)
@@ -444,58 +444,38 @@ public partial class SelectorWindow : Window
 
     private static Border BuildGhostContent(WindowCellViewModel cell)
     {
+        // 80x80 的小方块：背景 + 边框 + 居中图标，无标题
         var border = new Border
         {
-            CornerRadius = new CornerRadius(4),
-            Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(26, 26, 26)),
+            CornerRadius = new CornerRadius(8),
+            Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(30, 30, 30)),
             BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 212)),
             BorderThickness = new Thickness(2),
-            Opacity = 0.85,
             Effect = new DropShadowEffect
             {
-                BlurRadius = 20, Opacity = 0.7, ShadowDepth = 6, Color = Colors.Black,
+                BlurRadius = 12, Opacity = 0.6, ShadowDepth = 4, Color = Colors.Black,
             },
         };
-        var grid = new Grid();
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(30) });
-        // 拖动 ghost 只显示应用图标（不要实时渲染图，性能更好 + 视觉更轻）
         if (cell.Icon is BitmapSource icon)
         {
-            grid.Children.Add(new System.Windows.Controls.Image
+            border.Child = new System.Windows.Controls.Image
             {
                 Source = icon,
                 Stretch = Stretch.Uniform,
-                Width = 64,
-                Height = 64,
-                HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
-                VerticalAlignment = System.Windows.VerticalAlignment.Center,
-            });
+                Margin = new Thickness(10),
+            };
         }
         else
         {
-            grid.Children.Add(new TextBlock
+            border.Child = new TextBlock
             {
-                Text = "(no icon)",
+                Text = "?",
                 Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(136, 136, 136)),
-                FontSize = 11,
+                FontSize = 24,
                 HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
                 VerticalAlignment = System.Windows.VerticalAlignment.Center,
-            });
+            };
         }
-        var title = new TextBlock
-        {
-            Text = cell.Title,
-            Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(221, 221, 221)),
-            FontSize = 12,
-            VerticalAlignment = System.Windows.VerticalAlignment.Center,
-            HorizontalAlignment = System.Windows.HorizontalAlignment.Left,
-            Margin = new Thickness(10, 0, 10, 0),
-            TextTrimming = TextTrimming.CharacterEllipsis,
-        };
-        Grid.SetRow(title, 1);
-        grid.Children.Add(title);
-        border.Child = grid;
         return border;
     }
 
