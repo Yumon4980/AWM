@@ -16,27 +16,32 @@ using AltTabReplacer.ViewModels;
 namespace AltTabReplacer;
 
 /// <summary>
-/// 主选择器窗口。显示当前可见窗口的缩略图网格，
-/// 接收 123QWE 物理键、鼠标移动 / 点击、Esc。
-/// 由 <see cref="App"/> 创建和销毁。
+/// 主选择器窗口：双列布局
+///   左：搜索框 + 列表（图标 + 标题 + 索引）
+///   右：实时预览当前选中窗口
+/// 由 App 创建和销毁。
 /// </summary>
 public partial class SelectorWindow : Window
 {
     private readonly SelectorViewModel _vm = new();
     private readonly IReadOnlyList<WindowInfo> _raw;
     private readonly WindowActivator _activator;
+    private readonly WindowCaptureService _capture;
     private readonly Settings _settings;
-    private int _pageStart;   // 当前页起始索引（用于翻页）
+    private int _pageStart;
     private int _maxPerPage = 35;
 
     // ---- 拖动状态 ----
     private DateTime _mouseDownTime;
     private System.Windows.Point _mouseDownPos;
-    private int _mouseDownCellIndex = -1;     // 按下时所在的 cell index（-1 = 空白）
+    private int _mouseDownCellIndex = -1;
     private bool _isDragging;
-    private bool _suppressNextClick;          // 拖动刚结束：屏蔽 OnMouseLeftButtonUp 的切窗
-    private DispatcherTimer? _dragSafetyTimer;    // 轮询左键状态，兜底处理"窗口收不到 MouseUp"
-    private DispatcherTimer? _dragFollowTimer;    // 轮询 OS 鼠标位置，让 ghost 鼠标出 Window 也跟随
+    private bool _suppressNextClick;
+    private DispatcherTimer? _dragSafetyTimer;
+    private DispatcherTimer? _dragFollowTimer;
+
+    // ---- Ghost ----
+    private Window? _ghostWindow;
 
     public SelectorWindow(IReadOnlyList<WindowInfo> windows, WindowCaptureService capture, Settings settings)
     {
@@ -45,19 +50,17 @@ public partial class SelectorWindow : Window
 
         _raw = windows;
         _activator = new WindowActivator();
+        _capture = capture;
         _settings = settings;
         _maxPerPage = settings.Layout.MaxPerPage;
 
         BuildCells(capture);
 
-        // Show 后强制抢焦点（让按键 1/2/3 落到我们这里）
-        // 注意：不要用 ImmAssociateContext(hwnd, NULL)，那会破坏整个线程的 IME 状态。
-        // IME 拦截问题改用全局低层键盘钩子（LowLevelKeyboardHook）解决。
         Loaded += (_, __) =>
         {
             Activate();
             Focus();
-            Keyboard.Focus(this);
+            Keyboard.Focus(PART_SearchBox);
         };
     }
 
@@ -68,82 +71,205 @@ public partial class SelectorWindow : Window
         for (int i = _pageStart; i < end; i++)
         {
             var w = _raw[i];
-            // 关键：label 用 raw 内的全局索引（cells 重排后该 cell 的 label 不变）
             var label = i < Core.KeyMap.IndexToLabel.Length ? Core.KeyMap.IndexToLabel[i] : "?";
             BitmapSource? thumb = null;
+            BitmapSource? icon = null;
+            try { thumb = capture.Capture(w.Hwnd, _settings.Layout.CellWidth, _settings.Layout.CellHeight); } catch { }
+            try { icon = GetAppIcon(w.Hwnd); } catch { }
+            _vm.Cells.Add(new WindowCellViewModel(w, i, label, thumb, icon));
+        }
+        if (_vm.Cells.Count > 0) _vm.SelectedCell = _vm.Cells[0];
+        UpdatePreview();
+    }
+
+    /// <summary>从 hwnd 提取应用图标（WM_GETICON → BitmapSource）。</summary>
+    private static BitmapSource? GetAppIcon(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return null;
+        const uint WM_GETICON = 0x007F;
+        IntPtr hIcon = SendMessage(hwnd, WM_GETICON, (IntPtr)1, IntPtr.Zero);
+        if (hIcon == IntPtr.Zero) hIcon = SendMessage(hwnd, WM_GETICON, (IntPtr)0, IntPtr.Zero);
+        if (hIcon == IntPtr.Zero) return null;
+        try
+        {
+            using var icon = System.Drawing.Icon.FromHandle(hIcon);
+            using var bmp = icon.ToBitmap();
+            IntPtr hBitmap = bmp.GetHbitmap();
             try
             {
-                thumb = capture.Capture(w.Hwnd, _settings.Layout.CellWidth, _settings.Layout.CellHeight);
+                return System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
+                    hBitmap, IntPtr.Zero, System.Windows.Int32Rect.Empty,
+                    System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
             }
-            catch
-            {
-                // 单个窗口截图失败不影响整体
-            }
-            _vm.Cells.Add(new WindowCellViewModel(w, i, label, thumb));
+            finally { DeleteObject(hBitmap); }
         }
-        _vm.SelectedIndex = 0;
+        catch { return null; }
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool DeleteObject(IntPtr hObject);
+
+    // ----------------------------------------------------------
+    //  搜索 + 预览
+    // ----------------------------------------------------------
+
+    private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
+    {
+        _vm.SearchText = PART_SearchBox.Text;
+        PART_SearchHint.Visibility = string.IsNullOrEmpty(PART_SearchBox.Text)
+            ? Visibility.Visible : Visibility.Collapsed;
+        // 搜索后默认选中第一个
+        if (_vm.FilteredCells.Cast<object>().FirstOrDefault() is WindowCellViewModel first)
+            _vm.SelectedCell = first;
+        UpdatePreview();
+    }
+
+    private void OnSearchBoxPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        // 在搜索框内按 Esc 清除，按 Down 移到列表
+        if (e.Key == Key.Escape)
+        {
+            PART_SearchBox.Text = "";
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Down)
+        {
+            PART_List.Focus();
+            e.Handled = true;
+        }
+    }
+
+    private void OnListSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        UpdatePreview();
+    }
+
+    /// <summary>捕获当前选中窗口并显示在右侧预览区。</summary>
+    private void UpdatePreview()
+    {
+        if (_vm.SelectedCell == null)
+        {
+            PART_PreviewImage.Source = null;
+            PART_PreviewPlaceholder.Visibility = Visibility.Visible;
+            PART_PreviewTitle.Text = "";
+            return;
+        }
+
+        PART_PreviewTitle.Text = _vm.SelectedCell.Title;
+        try
+        {
+            var bmp = _capture.Capture(_vm.SelectedCell.Info.Hwnd, 0, 0);  // 0,0 = 原始大小
+            if (bmp != null)
+            {
+                PART_PreviewImage.Source = bmp;
+                PART_PreviewPlaceholder.Visibility = Visibility.Collapsed;
+            }
+            else
+            {
+                PART_PreviewImage.Source = null;
+                PART_PreviewPlaceholder.Visibility = Visibility.Visible;
+            }
+        }
+        catch
+        {
+            PART_PreviewImage.Source = null;
+            PART_PreviewPlaceholder.Visibility = Visibility.Visible;
+        }
     }
 
     // ----------------------------------------------------------
-    //  输入处理
+    //  输入处理：键盘 123QWE / 鼠标 hover
     // ----------------------------------------------------------
 
     private void OnKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
-        // 直接走 VK 路径（KeyMap 已经是 VK 索引）
         int vk = KeyInterop.VirtualKeyFromKey(e.Key);
         HandleVk(vk);
-        e.Handled = true;
     }
 
     /// <summary>由全局低层键盘钩子调用（在 WPF 线程上）。</summary>
     public void HandleVk(int vk)
     {
-        Logger.Info($"HandleVk: vk=0x{vk:X2} cells={_vm.Cells.Count}");
+        if (vk == 0x1B) { Cancel(); return; }   // Esc
+        if (vk == 0x09) { FlipPage((Keyboard.Modifiers & ModifierKeys.Shift) == 0); return; }  // Tab
 
-        // Esc = 取消
-        if (vk == 0x1B)
+        if (Core.KeyMap.ToIndex(vk) is int localIndex)
         {
-            Cancel();
+            // 数字键在 FilteredCells 中找对应 cell
+            var filtered = _vm.FilteredCells.Cast<WindowCellViewModel>().ToList();
+            if (localIndex < filtered.Count)
+            {
+                ActivateCellAndClose(filtered[localIndex]);
+            }
             return;
         }
-
-        // Tab / Shift+Tab = 翻页
-        if (vk == 0x09)
-        {
-            bool next = (Keyboard.Modifiers & ModifierKeys.Shift) == 0;
-            FlipPage(next);
-            return;
-        }
-
-        // 123QWE 物理键
-        if (Core.KeyMap.ToIndex(vk) is int localIndex && localIndex < _vm.Cells.Count)
-        {
-            ActivateAtAndClose(localIndex);
-            return;
-        }
-
-        // 其它键：不响应（钩子层不会拦截，所以这些键会传给前台窗口）
     }
 
-    private void ActivateAtAndClose(int localIndex)
+    private void ActivateCellAndClose(WindowCellViewModel cell)
     {
-        if (localIndex < 0 || localIndex >= _vm.Cells.Count) return;
-        var cell = _vm.Cells[localIndex];
-        try
-        {
-            _activator.Activate(cell.Info);
-        }
-        catch (Exception ex)
-        {
-            Logger.Error($"按键激活窗口失败: {ex.Message}");
-        }
+        try { _activator.Activate(cell.Info); }
+        catch (Exception ex) { Logger.Error($"按键激活失败: {ex.Message}"); }
         Close();
     }
 
-    private void OnMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    private void OnPreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
     {
-        // 保留以防 XAML 引用，但实际由 OnPreviewMouseMove 处理
+        if (_isDragging)
+        {
+            if (_mouseDownCellIndex >= 0) UpdateGhostFromOs();
+            return;
+        }
+
+        if (e.LeftButton == MouseButtonState.Pressed)
+        {
+            var elapsed = (DateTime.Now - _mouseDownTime).TotalMilliseconds;
+            if (elapsed < 200) return;
+            var pos = e.GetPosition(this);
+            var dx = Math.Abs(pos.X - _mouseDownPos.X);
+            var dy = Math.Abs(pos.Y - _mouseDownPos.Y);
+            if (dx < 8 && dy < 8) return;
+
+            _isDragging = true;
+            if (_mouseDownCellIndex >= 0)
+            {
+                ShowDragGhost();
+                UpdateGhostFromOs();
+                StartDragSafetyTimer();
+            }
+            else
+            {
+                try { DragMove(); } catch { _isDragging = false; }
+            }
+            return;
+        }
+
+        UpdateHoverHighlight(e);
+    }
+
+    private void UpdateHoverHighlight(System.Windows.Input.MouseEventArgs e)
+    {
+        var pos = e.GetPosition(PART_List);
+        var hit = PART_List.InputHitTest(pos) as DependencyObject;
+        if (hit == null) return;
+        var item = FindAncestor<ListBoxItem>(hit);
+        if (item != null)
+        {
+            var cell = item.DataContext as WindowCellViewModel;
+            if (cell != null && cell != _vm.SelectedCell)
+            {
+                _vm.SelectedCell = cell;
+            }
+        }
+    }
+
+    private void OnPreviewMouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (!_isDragging) return;
+        EndDrag();
     }
 
     private void OnMouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
@@ -152,14 +278,19 @@ public partial class SelectorWindow : Window
         {
             _isDragging = false;
             _suppressNextClick = false;
-            return;   // 拖动刚结束 / 切窗已被前置处理
+            return;
         }
-        ConfirmAndClose();
+        // 单击：切到选中窗口
+        if (_vm.SelectedCell != null)
+        {
+            try { _activator.Activate(_vm.SelectedCell.Info); } catch { }
+            Close();
+        }
+        else
+        {
+            Cancel();
+        }
     }
-
-    // ----------------------------------------------------------
-    //  长按拖动：背景拖窗口 / cell 拖动改排序
-    // ----------------------------------------------------------
 
     private void OnPreviewMouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
@@ -168,7 +299,7 @@ public partial class SelectorWindow : Window
         _isDragging = false;
         StopDragSafetyTimer();
 
-        // 判断按下点是否在某个 cell 上
+        // 判断按下点是否在列表中某行
         _mouseDownCellIndex = -1;
         var pos = e.GetPosition(PART_List);
         var hit = PART_List.InputHitTest(pos) as DependencyObject;
@@ -182,73 +313,8 @@ public partial class SelectorWindow : Window
         }
     }
 
-    private void OnPreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
-    {
-        // 1) 拖动中：跟手 + clamp 范围
-        if (_isDragging)
-        {
-            if (_mouseDownCellIndex >= 0)
-            {
-                UpdateGhostFromOs();
-            }
-            return;
-        }
-
-        // 2) 鼠标按下：长按阈值判断是否进入拖动
-        if (e.LeftButton == MouseButtonState.Pressed)
-        {
-            var elapsed = (DateTime.Now - _mouseDownTime).TotalMilliseconds;
-            if (elapsed < 200) return;
-
-            var pos = e.GetPosition(this);
-            var dx = Math.Abs(pos.X - _mouseDownPos.X);
-            var dy = Math.Abs(pos.Y - _mouseDownPos.Y);
-            if (dx < 8 && dy < 8) return;
-
-            _isDragging = true;
-            if (_mouseDownCellIndex >= 0)
-            {
-                ShowDragGhost();
-                UpdateGhostFromOs();
-                StartDragSafetyTimer();   // 兜底：即使窗口收不到 MouseUp 也能恢复
-            }
-            else
-            {
-                try { DragMove(); }
-                catch { _isDragging = false; }
-            }
-            return;
-        }
-
-        // 3) 鼠标未按下：hover 切高亮
-        UpdateHoverHighlight(e);
-    }
-
-    private void UpdateHoverHighlight(System.Windows.Input.MouseEventArgs e)
-    {
-        var pos = e.GetPosition(PART_List);
-        var hit = PART_List.InputHitTest(pos) as DependencyObject;
-        if (hit == null) return;
-        var item = FindAncestor<ListBoxItem>(hit);
-        if (item != null)
-        {
-            int idx = PART_List.ItemContainerGenerator.IndexFromContainer(item);
-            if (idx >= 0 && idx != _vm.SelectedIndex)
-            {
-                _vm.SelectedIndex = idx;
-            }
-        }
-    }
-
-    private void OnPreviewMouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
-    {
-        if (!_isDragging) return;
-        EndDrag();
-    }
-
     private void EndDrag()
     {
-        // 直接用 OS 屏幕坐标找最近 cell（不依赖 PointFromScreen 转换，避免 DPI / 多 Window 偏差）
         var screenPos = System.Windows.Forms.Cursor.Position;
         int target = _mouseDownCellIndex >= 0 ? FindNearestCellFromScreen(screenPos) : -1;
         HideDragGhost();
@@ -261,48 +327,9 @@ public partial class SelectorWindow : Window
             Logger.Info($"重排+持久化: {_mouseDownCellIndex} -> {target}");
         }
         _isDragging = false;
-        _suppressNextClick = true;   // 屏蔽紧跟的切窗
+        _suppressNextClick = true;
     }
 
-    // ----------------------------------------------------------
-    //  Safety timer：兜底处理"窗口收不到 MouseUp"的情况
-    //  每 33ms 轮询左键状态；若松开则强制结束拖动
-    // ----------------------------------------------------------
-
-    private void StartDragSafetyTimer()
-    {
-        if (_dragSafetyTimer != null) return;
-        _dragSafetyTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
-        {
-            Interval = TimeSpan.FromMilliseconds(33),
-        };
-        _dragSafetyTimer.Tick += (_, __) =>
-        {
-            if (!_isDragging)
-            {
-                StopDragSafetyTimer();
-                return;
-            }
-            // VK_LBUTTON = 0x01
-            if ((GetAsyncKeyState(0x01) & 0x8000) == 0)
-            {
-                Logger.Warn("通过 safety timer 检测到左键松开，强制结束拖动");
-                EndDrag();
-            }
-        };
-        _dragSafetyTimer.Start();
-    }
-
-    private void StopDragSafetyTimer()
-    {
-        _dragSafetyTimer?.Stop();
-        _dragSafetyTimer = null;
-    }
-
-    [System.Runtime.InteropServices.DllImport("user32.dll")]
-    private static extern short GetAsyncKeyState(int vKey);
-
-    /// <summary>用屏幕坐标找离 cursor 最近的 cell（按欧氏距离²）。不依赖 PointFromScreen 转换。</summary>
     private int FindNearestCellFromScreen(System.Drawing.Point screenPos)
     {
         double minDistSq = double.MaxValue;
@@ -325,37 +352,27 @@ public partial class SelectorWindow : Window
         if (from < 0 || from >= _vm.Cells.Count) return;
         if (to < 0 || to >= _vm.Cells.Count) return;
         if (from == to) return;
-
         var cell = _vm.Cells[from];
         _vm.Cells.RemoveAt(from);
         _vm.Cells.Insert(to, cell);
-        _vm.SelectedIndex = to;
-
-        // 关键：重排后让 KeyLabel 跟着位置走（每个 cell 显示它在 cells 里的新位置对应的按键）
+        // KeyLabel 跟着位置走
         for (int i = 0; i < _vm.Cells.Count; i++)
         {
             _vm.Cells[i].KeyLabel = i < Core.KeyMap.IndexToLabel.Length
-                ? Core.KeyMap.IndexToLabel[i]
-                : "?";
+                ? Core.KeyMap.IndexToLabel[i] : "?";
         }
         Logger.Info($"重排: {from} -> {to} ({cell.Info.Title})");
     }
 
     // ----------------------------------------------------------
-    //  Ghost 拖动特效：用独立 topmost 透明 Window（不是 Popup），
-    //  Window.Left/Top 是 OS 屏幕坐标，中心精确对准鼠标
+    //  Ghost 拖动特效
     // ----------------------------------------------------------
-
-    private Window? _ghostWindow;
-    private Border? _ghostBorder;
 
     private void ShowDragGhost()
     {
         if (_mouseDownCellIndex < 0 || _mouseDownCellIndex >= _vm.Cells.Count) return;
         var cell = _vm.Cells[_mouseDownCellIndex];
-
-        // 创建独立 topmost 透明 Window
-        _ghostBorder = BuildGhostContent(cell);
+        var border = BuildGhostContent(cell);
         _ghostWindow = new Window
         {
             WindowStyle = WindowStyle.None,
@@ -366,32 +383,26 @@ public partial class SelectorWindow : Window
             ShowActivated = false,
             IsHitTestVisible = false,
             Focusable = false,
-            Width = 256,
-            Height = 180,
-            Content = _ghostBorder,
+            Width = 256, Height = 180,
+            Content = border,
         };
-        // 初始位置：ghost 中心 = 鼠标
         var sp = System.Windows.Forms.Cursor.Position;
         var (dipX, dipY) = ScreenPxToDip(sp);
         _ghostWindow.Left = dipX - 128;
         _ghostWindow.Top = dipY - 90;
         _ghostWindow.Show();
-
         StartDragFollowTimer();
     }
 
-    /// <summary>从 OS 全局鼠标位置更新 ghost（鼠标出 Window 也能跟随）。</summary>
     private void UpdateGhostFromOs()
     {
         if (_ghostWindow == null) return;
-        var sp = System.Windows.Forms.Cursor.Position;     // 物理像素
-        // 物理像素 → WPF DIPs，然后偏移半宽半高让 ghost 中心对准鼠标
+        var sp = System.Windows.Forms.Cursor.Position;
         var (dipX, dipY) = ScreenPxToDip(sp);
         _ghostWindow.Left = dipX - 128;
         _ghostWindow.Top  = dipY - 90;
     }
 
-    /// <summary>物理像素 → WPF DIPs（用 _ghostWindow 的 CompositionTarget）。</summary>
     private (double x, double y) ScreenPxToDip(System.Drawing.Point sp)
     {
         if (_ghostWindow == null) return (sp.X, sp.Y);
@@ -407,12 +418,7 @@ public partial class SelectorWindow : Window
     private void HideDragGhost()
     {
         StopDragFollowTimer();
-        if (_ghostWindow != null)
-        {
-            _ghostWindow.Close();
-            _ghostWindow = null;
-        }
-        _ghostBorder = null;
+        if (_ghostWindow != null) { _ghostWindow.Close(); _ghostWindow = null; }
     }
 
     private void StartDragFollowTimer()
@@ -420,7 +426,7 @@ public partial class SelectorWindow : Window
         if (_dragFollowTimer != null) return;
         _dragFollowTimer = new DispatcherTimer(DispatcherPriority.Render, Dispatcher)
         {
-            Interval = TimeSpan.FromMilliseconds(16),  // 60Hz
+            Interval = TimeSpan.FromMilliseconds(16),
         };
         _dragFollowTimer.Tick += (_, __) =>
         {
@@ -447,24 +453,15 @@ public partial class SelectorWindow : Window
             Opacity = 0.85,
             Effect = new DropShadowEffect
             {
-                BlurRadius = 20,
-                Opacity = 0.7,
-                ShadowDepth = 6,
-                Color = Colors.Black,
+                BlurRadius = 20, Opacity = 0.7, ShadowDepth = 6, Color = Colors.Black,
             },
         };
-
         var grid = new Grid();
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(30) });
-
         if (cell.Thumbnail is BitmapSource thumb)
         {
-            grid.Children.Add(new System.Windows.Controls.Image
-            {
-                Source = thumb,
-                Stretch = Stretch.UniformToFill,
-            });
+            grid.Children.Add(new System.Windows.Controls.Image { Source = thumb, Stretch = Stretch.UniformToFill });
         }
         else
         {
@@ -477,7 +474,6 @@ public partial class SelectorWindow : Window
                 VerticalAlignment = System.Windows.VerticalAlignment.Center,
             });
         }
-
         var title = new TextBlock
         {
             Text = cell.Title,
@@ -490,48 +486,57 @@ public partial class SelectorWindow : Window
         };
         Grid.SetRow(title, 1);
         grid.Children.Add(title);
-
         border.Child = grid;
         return border;
     }
 
-    /// <summary>用户重排后触发；App 订阅以持久化到 RuleStore。</summary>
-    public event Action<IReadOnlyList<WindowCellViewModel>>? OrderChanged;
-
-    /// <summary>让 App 能在 Closed 时读取当前顺序（不依赖事件丢失）。</summary>
-    public IReadOnlyList<WindowCellViewModel> CurrentCells => _vm.Cells;
-
     // ----------------------------------------------------------
-    //  外部调用
+    //  Safety timer
     // ----------------------------------------------------------
 
-    /// <summary>切到当前选中窗口并关闭（保留作 API 兼容，目前 Quick-Switcher 模式不调用）。</summary>
+    private void StartDragSafetyTimer()
+    {
+        if (_dragSafetyTimer != null) return;
+        _dragSafetyTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+        {
+            Interval = TimeSpan.FromMilliseconds(33),
+        };
+        _dragSafetyTimer.Tick += (_, __) =>
+        {
+            if (!_isDragging) { StopDragSafetyTimer(); return; }
+            if ((GetAsyncKeyState(0x01) & 0x8000) == 0)
+            {
+                Logger.Warn("safety timer 检测到松手，强制结束拖动");
+                EndDrag();
+            }
+        };
+        _dragSafetyTimer.Start();
+    }
+
+    private void StopDragSafetyTimer()
+    {
+        _dragSafetyTimer?.Stop();
+        _dragSafetyTimer = null;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    // ----------------------------------------------------------
+    //  切窗 / 取消 / 翻页
+    // ----------------------------------------------------------
+
+    /// <summary>切到当前选中窗口并关闭（保留作 API 兼容）。</summary>
     public void ConfirmAndClose()
     {
-        Logger.Info($"SelectorWindow.ConfirmAndClose: cells={_vm.Cells.Count} selectedIndex={_vm.SelectedIndex}");
-        if (_vm.Cells.Count == 0)
+        if (_vm.SelectedCell != null)
         {
-            Close();
-            return;
+            try { _activator.Activate(_vm.SelectedCell.Info); } catch { }
         }
-        var selected = _vm.Cells[_vm.SelectedIndex];
-        try
-        {
-            _activator.Activate(selected.Info);
-        }
-        finally
-        {
-            Logger.Info("SelectorWindow.ConfirmAndClose -> Close()");
-            Close();
-        }
-    }
-
-    /// <summary>取消：仅关闭，不切窗（Quick-Switcher 模式下 Alt+Z 二次 / Esc 走这里）。</summary>
-    public void Cancel()
-    {
-        Logger.Info("SelectorWindow.Cancel -> Close()");
         Close();
     }
+
+    public void Cancel() => Close();
 
     private void FlipPage(bool next)
     {
@@ -548,14 +553,17 @@ public partial class SelectorWindow : Window
         BuildCells(GetCaptureService());
     }
 
-    private WindowCaptureService GetCaptureService()
-    {
-        // 简化：从 App 单例拿（个人自用工具，足够）
-        return ((App)System.Windows.Application.Current).CaptureService!;
-    }
+    private WindowCaptureService GetCaptureService() => ((App)System.Windows.Application.Current).CaptureService!;
 
     // ----------------------------------------------------------
-    //  辅助
+    //  事件
+    // ----------------------------------------------------------
+
+    public event Action<IReadOnlyList<WindowCellViewModel>>? OrderChanged;
+    public IReadOnlyList<WindowCellViewModel> CurrentCells => _vm.Cells;
+
+    // ----------------------------------------------------------
+    //  Helpers
     // ----------------------------------------------------------
 
     private static T? FindAncestor<T>(DependencyObject? d) where T : DependencyObject

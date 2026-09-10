@@ -21,13 +21,17 @@ public sealed class WindowCellViewModel : INotifyPropertyChanged
     }
 
     public System.Windows.Media.Imaging.BitmapSource? Thumbnail { get; }
+    public System.Windows.Media.Imaging.BitmapSource? Icon { get; }
 
-    public WindowCellViewModel(WindowInfo info, int index, string keyLabel, System.Windows.Media.Imaging.BitmapSource? thumbnail)
+    public WindowCellViewModel(WindowInfo info, int index, string keyLabel,
+        System.Windows.Media.Imaging.BitmapSource? thumbnail,
+        System.Windows.Media.Imaging.BitmapSource? icon)
     {
         Info = info;
         Title = TruncateTitle(info.Title, 32);
         _keyLabel = keyLabel;
         Thumbnail = thumbnail;
+        Icon = icon;
     }
 
     private static string TruncateTitle(string s, int max)
