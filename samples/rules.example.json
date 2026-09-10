@@ -1,0 +1,26 @@
+[
+  {
+    "id": "11111111-1111-1111-1111-111111111111",
+    "matchType": "ProcessName",
+    "pattern": "Code.exe",
+    "priority": 100,
+    "isPinned": true,
+    "isExcluded": false
+  },
+  {
+    "id": "22222222-2222-2222-2222-222222222222",
+    "matchType": "ProcessName",
+    "pattern": "WindowsTerminal.exe",
+    "priority": 90,
+    "isPinned": true,
+    "isExcluded": false
+  },
+  {
+    "id": "33333333-3333-3333-3333-333333333333",
+    "matchType": "WindowTitle",
+    "pattern": "WeChat",
+    "priority": 0,
+    "isPinned": false,
+    "isExcluded": true
+  }
+]
