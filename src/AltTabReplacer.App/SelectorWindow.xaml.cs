@@ -459,15 +459,24 @@ public partial class SelectorWindow : Window
         var grid = new Grid();
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(30) });
-        if (cell.Thumbnail is BitmapSource thumb)
+        // 拖动 ghost 只显示应用图标（不要实时渲染图，性能更好 + 视觉更轻）
+        if (cell.Icon is BitmapSource icon)
         {
-            grid.Children.Add(new System.Windows.Controls.Image { Source = thumb, Stretch = Stretch.UniformToFill });
+            grid.Children.Add(new System.Windows.Controls.Image
+            {
+                Source = icon,
+                Stretch = Stretch.Uniform,
+                Width = 96,
+                Height = 96,
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
+                VerticalAlignment = System.Windows.VerticalAlignment.Center,
+            });
         }
         else
         {
             grid.Children.Add(new TextBlock
             {
-                Text = "(no preview)",
+                Text = "(no icon)",
                 Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(136, 136, 136)),
                 FontSize = 11,
                 HorizontalAlignment = System.Windows.HorizontalAlignment.Center,

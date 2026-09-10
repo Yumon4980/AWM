@@ -52,11 +52,14 @@ public sealed class WindowCaptureService
             IntPtr hBitmap = bmp.GetHbitmap();
             try
             {
-                return Imaging.CreateBitmapSourceFromHBitmap(
-                    hBitmap,
-                    IntPtr.Zero,
-                    Int32Rect.Empty,
-                    BitmapSizeOptions.FromWidthAndHeight(targetWidth, targetHeight));
+                // targetWidth/Height=0,0 表示"用原图大小"，必须用 FromEmptyOptions（FromWidthAndHeight 不接受 0）
+                var bmpOptions = (targetWidth > 0 && targetHeight > 0)
+                    ? BitmapSizeOptions.FromWidthAndHeight(targetWidth, targetHeight)
+                    : BitmapSizeOptions.FromEmptyOptions();
+                var bmpSrc = Imaging.CreateBitmapSourceFromHBitmap(
+                    hBitmap, IntPtr.Zero, Int32Rect.Empty, bmpOptions);
+                bmpSrc.Freeze();   // 跨线程 + XAML 绑定安全
+                return bmpSrc;
             }
             finally
             {
