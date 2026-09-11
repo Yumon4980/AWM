@@ -28,6 +28,23 @@ public sealed class ResolvedSlot
     /// <summary>溢出组（"更多…"）不写回布局，只是运行时的容器。</summary>
     public bool IsOverflow { get; init; }
 
+    /// <summary>
+    /// 组内成员的显示顺序（窗口标题）。null 表示按 z-order。
+    /// 只有用户在组内手动拖过才会有值。
+    /// </summary>
+    public IReadOnlyList<string>? MemberOrder { get; init; }
+
+    /// <summary>
+    /// 精确到窗口的成员描述。null 表示"按进程取全部窗口"（自动折叠语义）。
+    /// 手工建的分组 / 解散后的槽位会有值，顺序即 <see cref="Windows"/> 的顺序。
+    /// </summary>
+    public IReadOnlyList<MemberSpec>? Members { get; init; }
+
+    /// <summary>
+    /// 旧字段：解散单进程组时置位。现已由 <see cref="Members"/> 取代，仅为兼容旧布局保留。
+    /// </summary>
+    public bool NoAutoGroup { get; init; }
+
     public WindowInfo? SingleWindow => Windows.Count > 0 ? Windows[0] : null;
     public int Count => Windows.Count;
 
@@ -42,6 +59,9 @@ public sealed class ResolvedSlot
         Windows = Windows,
         Processes = Processes,
         IsOverflow = IsOverflow,
+        MemberOrder = MemberOrder,
+        Members = Members,          // 必须带上：丢了它就退化成"该进程的全部窗口"
+        NoAutoGroup = NoAutoGroup,
     };
 }
 
@@ -72,28 +92,86 @@ public static class LayoutResolver
         var remaining = new List<WindowInfo>(windows);
         var slots = new List<ResolvedSlot>();
 
-        // ---- 1) 先按已保存的布局安置 ----
-        foreach (var def in layout.Slots)
+        // ---- 0) 跨槽位先做一遍"精确匹配"，把所有 (进程, 标题) 预留掉 ----
+        // 必须整体先做。否则某个槽位的"按进程兜底"（TakeAnyOfProcess）会抢走
+        // 后面槽位本该精确匹配的窗口——用户看到的是"关掉一个窗口后两个分组被合并了"。
+        var exactBySlot = new Dictionary<int, WindowInfo?[]>();
+        for (int d = 0; d < layout.Slots.Count; d++)
         {
-            if (def.Processes.Count == 0) continue;
+            var def = layout.Slots[d];
+            if (def.Members is not { Count: > 0 }) continue;
+            var arr = new WindowInfo?[def.Members.Count];
+            for (int i = 0; i < def.Members.Count; i++)
+                arr[i] = TakeExact(remaining, def.Members[i]);
+            exactBySlot[d] = arr;
+        }
 
+        // ---- 1) 再按布局顺序组装。精确匹配没中的，才允许按进程兜底 ----
+        for (int d = 0; d < layout.Slots.Count; d++)
+        {
+            var def = layout.Slots[d];
             var taken = new List<WindowInfo>();
-            foreach (var proc in def.Processes)
+            // 与 taken 一一对应的 spec 列表：某个成员这轮没认领到窗口时，
+            // 必须把它从 Members 里一起剔除，否则 Windows[i] 会和 Members[i] 错位，
+            // 成员的自定义显示名就会张冠李戴。
+            List<MemberSpec>? matchedSpecs = null;
+
+            if (def.Members is { Count: > 0 })
             {
-                for (int i = remaining.Count - 1; i >= 0; i--)
+                // 精确到窗口：逐个 spec 认领，顺序就是 Members 的顺序
+                var arr = exactBySlot[d];
+                matchedSpecs = new List<MemberSpec>(def.Members.Count);
+                for (int i = 0; i < def.Members.Count; i++)
                 {
-                    if (string.Equals(remaining[i].ProcessName, proc, StringComparison.OrdinalIgnoreCase))
-                    {
-                        taken.Add(remaining[i]);
-                        remaining.RemoveAt(i);
-                    }
+                    var w = arr[i] ?? TakeAnyOfProcess(remaining, def.Members[i].Process);
+                    if (w == null) continue;          // 这个成员没开，跳过它和它的 spec
+                    taken.Add(w);
+                    matchedSpecs.Add(def.Members[i]);
                 }
             }
-            if (taken.Count == 0) continue;   // 这条布局对应的进程这次一个都没开，丢弃
+            else
+            {
+                if (def.Processes.Count == 0) continue;
+                foreach (var proc in def.Processes)
+                {
+                    for (int i = remaining.Count - 1; i >= 0; i--)
+                    {
+                        if (string.Equals(remaining[i].ProcessName, proc, StringComparison.OrdinalIgnoreCase))
+                        {
+                            taken.Add(remaining[i]);
+                            remaining.RemoveAt(i);
+                        }
+                    }
+                }
+                // 恢复 z-order（上面倒序遍历是为了安全删除）
+                taken = SortByZOrder(taken, windows);
+            }
 
-            // 恢复 z-order（上面倒序遍历是为了安全删除）
-            taken = SortByZOrder(taken, windows);
-            slots.AddRange(MakeSlots(def.Kind, def.Name, def.Processes, taken, autoGroupThreshold));
+            if (taken.Count == 0) continue;   // 这条布局对应的窗口这次一个都没开，丢弃
+
+            // 旧字段兼容：解散单进程组 → 每窗口一个槽位
+            if (def.NoAutoGroup && def.Members is null or { Count: 0 } && taken.Count > 1)
+            {
+                foreach (var w in ApplyMemberOrder(taken, def.MemberOrder))
+                {
+                    slots.Add(new ResolvedSlot
+                    {
+                        Kind = SlotKind.Window,
+                        Name = w.Title,
+                        Windows = new[] { w },
+                        Processes = new[] { w.ProcessName },
+                        Members = new[] { new MemberSpec(w.ProcessName, w.Title) },
+                    });
+                }
+                continue;
+            }
+
+            var procs = matchedSpecs is { Count: > 0 }
+                ? matchedSpecs.Select(m => m.Process).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
+                : def.Processes;
+
+            slots.AddRange(MakeSlots(def.Kind, def.Name, procs, taken, autoGroupThreshold,
+                def.MemberOrder, matchedSpecs));
         }
 
         // ---- 2) 布局里没提到的进程，按 z-order 追加 ----
@@ -105,6 +183,65 @@ public static class LayoutResolver
 
         // ---- 3) 溢出处理 ----
         return ApplyOverflow(slots, pageSize);
+    }
+
+    /// <summary>
+    /// 按用户拖出来的顺序排组成员。
+    /// 标题对不上的（换过文件、换过标签）退回 z-order 排在已知成员之后——
+    /// 宁可位置不理想，也不能因为标题变了就把窗口藏起来。
+    /// </summary>
+    private static List<WindowInfo> ApplyMemberOrder(List<WindowInfo> members, IReadOnlyList<string>? order)
+    {
+        if (order == null || order.Count == 0) return members;
+
+        var rank = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < order.Count; i++)
+        {
+            if (!rank.ContainsKey(order[i])) rank[order[i]] = i;
+        }
+
+        return members
+            .Select((w, i) => (w, i))
+            .OrderBy(x => rank.TryGetValue(x.w.Title, out int r) ? r : int.MaxValue)
+            .ThenBy(x => x.i)                       // 未匹配的保持原 z-order
+            .Select(x => x.w)
+            .ToList();
+    }
+
+    /// <summary>按 (进程, 标题) 精确认领一个窗口，并从待分配里移除。</summary>
+    private static WindowInfo? TakeExact(List<WindowInfo> remaining, MemberSpec spec)
+    {
+        if (string.IsNullOrEmpty(spec.Title)) return null;
+        for (int i = 0; i < remaining.Count; i++)
+        {
+            if (string.Equals(remaining[i].ProcessName, spec.Process, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(remaining[i].Title, spec.Title, StringComparison.OrdinalIgnoreCase))
+            {
+                var w = remaining[i];
+                remaining.RemoveAt(i);
+                return w;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// 标题对不上时的兜底：认领该进程的任意一个窗口。
+    /// 标题会变（VS Code 换文件），没有兜底的话那个窗口就会掉出分组、
+    /// 用户看到的是"分组里的窗口莫名其妙少了一个"。
+    /// </summary>
+    private static WindowInfo? TakeAnyOfProcess(List<WindowInfo> remaining, string process)
+    {
+        for (int i = 0; i < remaining.Count; i++)
+        {
+            if (string.Equals(remaining[i].ProcessName, process, StringComparison.OrdinalIgnoreCase))
+            {
+                var w = remaining[i];
+                remaining.RemoveAt(i);
+                return w;
+            }
+        }
+        return null;
     }
 
     /// <summary>按窗口在原始 z-order 列表中的位置排序。</summary>
@@ -122,35 +259,48 @@ public static class LayoutResolver
     /// </summary>
     private static IEnumerable<ResolvedSlot> MakeSlots(
         SlotKind declaredKind, string? name, IReadOnlyList<string> processes,
-        List<WindowInfo> members, int autoGroupThreshold)
+        List<WindowInfo> members, int autoGroupThreshold,
+        IReadOnlyList<string>? memberOrder = null,
+        IReadOnlyList<MemberSpec>? memberSpecs = null)
     {
         bool isGroup = members.Count > 1
             && (declaredKind == SlotKind.Group || members.Count >= autoGroupThreshold);
 
         if (isGroup)
         {
+            var ordered = memberSpecs is { Count: > 0 }
+                ? members                                    // 手工组：顺序由 Members 决定
+                : ApplyMemberOrder(members, memberOrder);    // 自动折叠组：按用户拖过的顺序
             yield return new ResolvedSlot
             {
                 Kind = SlotKind.Group,
-                Name = string.IsNullOrWhiteSpace(name) ? AutoName(members) : name!,
+                Name = string.IsNullOrWhiteSpace(name) ? AutoName(ordered) : name!,
                 CustomName = string.IsNullOrWhiteSpace(name) ? null : name,
-                Windows = members,
+                Windows = ordered,
                 Processes = processes.ToArray(),
+                MemberOrder = memberSpecs is { Count: > 0 } ? null : memberOrder,
+                Members = memberSpecs,
             };
             yield break;
         }
 
-        foreach (var w in members)
+        for (int i = 0; i < members.Count; i++)
         {
+            var w = members[i];
             // 用户改过名就用用户的，否则用窗口标题
             bool named = !string.IsNullOrWhiteSpace(name);
+            // 成员的自定义显示名（二级右键"重命名程序"）优先；组解散成单窗口时也保住
+            string? memberName = memberSpecs is { Count: > 0 } && i < memberSpecs.Count
+                ? memberSpecs[i].DisplayName
+                : null;
             yield return new ResolvedSlot
             {
                 Kind = SlotKind.Window,
-                Name = named ? name! : w.Title,
-                CustomName = named ? name : null,
+                Name = named ? name! : (string.IsNullOrWhiteSpace(memberName) ? w.Title : memberName!),
+                CustomName = named ? name : memberName,
                 Windows = new[] { w },
                 Processes = new[] { w.ProcessName },
+                Members = new[] { new MemberSpec(w.ProcessName, w.Title) { DisplayName = memberName } },
             };
         }
     }
@@ -183,6 +333,9 @@ public static class LayoutResolver
         var overflowProcs = tail.SelectMany(s => s.Processes)
                                 .Distinct(StringComparer.OrdinalIgnoreCase)
                                 .ToList();
+        // 把各槽位已有的显示名（成员自定义名 / 窗口自定义名）带进溢出组，
+        // 否则进入"更多…"后，二级右键"重命名程序"改的名字会消失。
+        var overflowMembers = tail.SelectMany(SlotMemberSpecs).ToList();
 
         head.Add(new ResolvedSlot
         {
@@ -190,28 +343,68 @@ public static class LayoutResolver
             Name = $"更多… ({overflowWindows.Count})",
             Windows = overflowWindows,
             Processes = overflowProcs,
+            Members = overflowMembers,
             IsOverflow = true,
         });
         return head;
+    }
+
+    /// <summary>把一个槽位的窗口展开成成员描述，带上各自的显示名（若有）。</summary>
+    private static IEnumerable<MemberSpec> SlotMemberSpecs(ResolvedSlot s)
+    {
+        for (int i = 0; i < s.Windows.Count; i++)
+        {
+            var w = s.Windows[i];
+            string? display = null;
+            if (s.Members is { Count: > 0 } && i < s.Members.Count)
+                display = s.Members[i].DisplayName;
+            else if (s.Kind == SlotKind.Window)
+                display = s.CustomName;
+            yield return new MemberSpec(w.ProcessName, w.Title) { DisplayName = display };
+        }
     }
 
     /// <summary>把当前槽位顺序写成可持久化的布局（溢出组会被摊平）。</summary>
     public static LayoutDocument ToDocument(IReadOnlyList<ResolvedSlot> slots)
     {
         var doc = new LayoutDocument();
+
         foreach (var s in slots)
         {
             if (s.IsOverflow)
             {
-                // 溢出组只是运行时容器，摊平成各自独立的槽位，别把它固化下来
-                foreach (var proc in s.Processes)
+                // 溢出组只是运行时容器，摊平成各自独立的槽位，别把它固化下来。
+                // 成员若被二级右键改过显示名，摊平后要落到这个窗口槽位的 Name 上，别丢。
+                for (int i = 0; i < s.Windows.Count; i++)
                 {
+                    var w = s.Windows[i];
+                    string? display = s.Members is { Count: > 0 } && i < s.Members.Count
+                        ? s.Members[i].DisplayName
+                        : null;
                     doc.Slots.Add(new SlotDefinition
                     {
                         Kind = SlotKind.Window,
-                        Processes = new List<string> { proc },
+                        Name = display,
+                        Processes = new List<string> { w.ProcessName },
+                        Members = new List<MemberSpec> { new(w.ProcessName, w.Title) { DisplayName = display } },
                     });
                 }
+                continue;
+            }
+
+            // 精确到窗口的槽位（手工组 / 解散后的窗口 / 单个窗口）：
+            // 每个槽位写一条定义，各自认领具体窗口。
+            // 这样每个槽位的名字、顺序都能独立保留——旧实现把同进程的槽位合并成一条，
+            // 结果**重命名的名字直接丢了**，而且一条定义会去抢该进程的全部窗口。
+            if (s.Members is { Count: > 0 })
+            {
+                doc.Slots.Add(new SlotDefinition
+                {
+                    Kind = s.Kind,
+                    Name = s.CustomName,
+                    Processes = s.Processes.ToList(),
+                    Members = s.Members.ToList(),
+                });
                 continue;
             }
 
@@ -221,6 +414,8 @@ public static class LayoutResolver
                 // 只有用户改过的名字才落盘；没改过的下次解析时重新推导（窗口标题会变，存了反而会过期）
                 Name = s.CustomName,
                 Processes = s.Processes.ToList(),
+                // 只有用户在组内拖过才记顺序
+                MemberOrder = s.MemberOrder?.ToList(),
             });
         }
         return doc;

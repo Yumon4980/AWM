@@ -98,4 +98,21 @@ public sealed class WindowActivator
             Logger.Warn($"ForceForeground 未生效 (HWND=0x{hwnd:X})");
         }
     }
+
+    /// <summary>
+    /// 让窗口变成"点击穿透 + 不抢激活"。
+    ///
+    /// 拖动时跟随光标的 ghost 窗口是 Topmost 且正好压在光标底下，
+    /// 不打这个标记的话它会抢走鼠标消息，SelectorWindow 就收不到 MouseMove，
+    /// 落点判定会一直停在拖动开始那一刻——表现为"拖了但没反应"。
+    ///
+    /// 注意：WPF 的 <c>IsHitTestVisible</c> 只管窗口**内部**的命中测试，
+    /// 管不了 Win32 层面谁接收鼠标消息，所以必须设置 WS_EX_TRANSPARENT。
+    /// </summary>
+    public static void MakeClickThrough(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return;
+        long ex = GetWindowLong(hwnd, GWL_EXSTYLE).ToInt64();
+        SetWindowLongPtr(hwnd, GWL_EXSTYLE, (IntPtr)(ex | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE));
+    }
 }

@@ -35,8 +35,11 @@ public partial class App : System.Windows.Application
     private bool _hookWasInstalled = true;
     private WinForms.NotifyIcon? _trayIcon;
     private volatile bool _selectorActive;
-    /// <summary>搜索模式下必须放行索引键，否则搜索框一个字都打不进去。</summary>
-    private volatile bool _searchMode;
+    /// <summary>
+    /// 暂时放行索引键（16 个键）给文本输入。
+    /// 搜索模式和重命名对话框都要用——否则输入框里打 123qwe 会被钩子吞掉，一个字都打不进去。
+    /// </summary>
+    private volatile bool _suspendIndexCapture;
     private string? _rulesPath;
 
     protected override void OnStartup(StartupEventArgs e)
@@ -145,8 +148,8 @@ public partial class App : System.Windows.Application
             // hook 线程：只能做"原子"判断
             if (_hotkey!.TryHandleHookKey(e)) return LowLevelKeyboardHook.HookAction.Swallow;
             if (!_selectorActive || !e.IsDown) return LowLevelKeyboardHook.HookAction.Pass;
-            // 搜索模式下索引键要留给文本输入，不能再吞
-            if (_searchMode) return LowLevelKeyboardHook.HookAction.Pass;
+            // 搜索模式 / 重命名对话框期间，索引键要留给文本输入，不能再吞
+            if (_suspendIndexCapture) return LowLevelKeyboardHook.HookAction.Pass;
             return Core.KeyMap.ToIndex(e.Vk).HasValue
                 ? LowLevelKeyboardHook.HookAction.SwallowAndObserve
                 : LowLevelKeyboardHook.HookAction.Pass;
@@ -400,9 +403,9 @@ public partial class App : System.Windows.Application
             // 抢前台统一放在 Show() 之后、直接作用在选择器上（AttachThreadInput 本来就不依赖
             // 本进程当前是不是前台）。
             _selector = new SelectorWindow(windows, slots, _capture!, _settings!);
-            _selector.Closed += (_, __) => { _selectorActive = false; _searchMode = false; };
+            _selector.Closed += (_, __) => { _selectorActive = false; _suspendIndexCapture = false; };
             _selector.LayoutChanged += OnSelectorLayoutChanged;
-            _selector.SearchModeChanged += on => _searchMode = on;
+            _selector.SuspendIndexCaptureChanged += on => _suspendIndexCapture = on;
             _selectorActive = true;
             _selector.Show();
 

@@ -12,6 +12,32 @@
         ShowActivated="True"
         Width="900" Height="600"
         PreviewKeyDown="OnWindowPreviewKeyDown">
+    <Window.Resources>
+        <Style x:Key="MenuBtn" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#FFDDDDDD"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="12,7"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                CornerRadius="4" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#33FFFFFF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
     <Grid x:Name="PART_Grid">
         <Border x:Name="PART_Root" CornerRadius="8" Background="#E6202020"
                 KeyDown="OnKeyDown"
@@ -88,7 +114,7 @@
                                  ScrollViewer.VerticalScrollBarVisibility="Auto"
                                  KeyboardNavigation.DirectionalNavigation="None"
                                  MouseLeftButtonUp="OnMouseLeftButtonUp"
-                                 ContextMenuOpening="OnListContextMenuOpening"
+                                 PreviewMouseRightButtonUp="OnListPreviewMouseRightButtonUp"
                                  SelectionChanged="OnListSelectionChanged">
                             <ListBox.ItemContainerStyle>
                                 <Style TargetType="ListBoxItem">
@@ -107,14 +133,10 @@
                                                             BorderThickness="2"
                                                             BorderBrush="Transparent"
                                                             Background="Transparent">
-                                                        <!-- 右键菜单。ContextMenu 不在可视树上，DataContext 不会自动继承，
-                                                             用 PlacementTarget 手动接上当前行 -->
-                                                        <Border.ContextMenu>
-                                                            <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
-                                                                <MenuItem Header="重命名…" Click="OnRenameMenuClick"/>
-                                                                <MenuItem Header="解散分组" Click="OnDissolveMenuClick"/>
-                                                            </ContextMenu>
-                                                        </Border.ContextMenu>
+                                                        <!-- 右键菜单在代码里构建（见 ShowRowMenu）。
+                                                             放在模板里再用 PlacementTarget 绑 DataContext 太容易失灵：
+                                                             ContextMenu 不在可视树上，模板里的 RelativeSource 绑定不可靠，
+                                                             菜单能弹出来但点菜单项没反应。 -->
                                                         <Grid>
                                                             <Grid.ColumnDefinitions>
                                                                 <ColumnDefinition Width="4"/>
@@ -240,6 +262,30 @@
                     </Grid>
                 </Border>
             </Grid>
+        </Border>
+
+        <!-- 右键菜单：画在**自己的可视树里**，不用 ContextMenu/Popup。
+             选择器是 Topmost 窗口，而 ContextMenu 是独立的弹出窗口，
+             一旦盖不住就会被主窗口挡在后面（用户看到的就是"右键没反应"）。
+             画在自己窗口里则不存在层级、激活权、绑定上下文这些问题。 -->
+        <Border x:Name="PART_Menu"
+                Visibility="Collapsed"
+                HorizontalAlignment="Left" VerticalAlignment="Top"
+                Background="#FF2A2A2A" BorderBrush="#FF0078D4" BorderThickness="1"
+                CornerRadius="6" Padding="4" MinWidth="150">
+            <Border.Effect>
+                <DropShadowEffect BlurRadius="14" Opacity="0.75" ShadowDepth="3" Color="Black"/>
+            </Border.Effect>
+            <StackPanel>
+                <Button x:Name="PART_MenuRename" Content="重命名…"
+                        Style="{StaticResource MenuBtn}" Click="OnMenuRenameClick"/>
+                <Button x:Name="PART_MenuClose" Content="关闭程序"
+                        Style="{StaticResource MenuBtn}" Click="OnMenuCloseClick"/>
+                <Button x:Name="PART_MenuDissolve" Content="解散分组"
+                        Style="{StaticResource MenuBtn}" Click="OnMenuDissolveClick"/>
+                <Button x:Name="PART_MenuRemove" Content="移出分组"
+                        Style="{StaticResource MenuBtn}" Click="OnMenuRemoveClick"/>
+            </StackPanel>
         </Border>
     </Grid>
 </Window>

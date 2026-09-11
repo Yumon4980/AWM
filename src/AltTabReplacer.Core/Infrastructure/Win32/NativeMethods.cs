@@ -27,6 +27,22 @@ internal static class NativeMethods
     public const int GWL_EXSTYLE = -20;
     public const long WS_EX_TOOLWINDOW = 0x00000080L;
     public const long WS_EX_APPWINDOW = 0x00040000L;
+    /// <summary>点击穿透：鼠标事件直接落到下层窗口。</summary>
+    public const long WS_EX_TRANSPARENT = 0x00000020L;
+    /// <summary>不抢激活。</summary>
+    public const long WS_EX_NOACTIVATE = 0x08000000L;
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+    private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)]
+    private static extern int SetWindowLongPtr32(IntPtr hWnd, int nIndex, int dwNewLong);
+
+    /// <summary>SetWindowLongPtr 在 32/64 位下导出名不同，这里统一。</summary>
+    public static IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong) =>
+        IntPtr.Size == 8
+            ? SetWindowLongPtr64(hWnd, nIndex, dwNewLong)
+            : (IntPtr)SetWindowLongPtr32(hWnd, nIndex, dwNewLong.ToInt32());
 
     // DWM 属性
     public const uint DWMWA_CLOAKED = 14;
@@ -161,6 +177,12 @@ internal static class NativeMethods
     // ============================================================
     //  Icon
     // ============================================================
+
+    public const uint WM_CLOSE = 0x0010;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
     public const int GCLP_HICON = -14;
     public const int GCLP_HICONSM = -34;
