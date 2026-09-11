@@ -43,22 +43,6 @@ public partial class ConfigWindow : Window
         }
     }
 
-    private void OnUpClick(object sender, RoutedEventArgs e)
-    {
-        if (Grid.SelectedItem is ConfigRuleViewModel vm)
-        {
-            vm.Priority += 10;
-        }
-    }
-
-    private void OnDownClick(object sender, RoutedEventArgs e)
-    {
-        if (Grid.SelectedItem is ConfigRuleViewModel vm)
-        {
-            vm.Priority -= 10;
-        }
-    }
-
     private void OnOpenFileClick(object sender, RoutedEventArgs e)
     {
         try

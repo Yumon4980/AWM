@@ -42,9 +42,18 @@ if ($LASTEXITCODE -ne 0) { Write-Host '  build failed' -ForegroundColor Red; exi
 Write-Host '  OK' -ForegroundColor Green
 
 Write-Host ''
-Write-Host '[4/4] launching AltTabReplacer...' -ForegroundColor Cyan
-Write-Host '  Press your hotkey (default Alt+Z) to invoke the selector.' -ForegroundColor DarkGray
+Write-Host '[4/4] launching AltTabReplacer (elevated)...' -ForegroundColor Cyan
+Write-Host '  Press your hotkey (default Alt+Tab) to invoke the selector.' -ForegroundColor DarkGray
 Write-Host '  To exit: Stop-Process -Name AltTabReplacer  OR  Task Manager.' -ForegroundColor DarkGray
 Write-Host ''
 
-& dotnet run --project src/AltTabReplacer.App -c Debug --no-build
+# The app manifest requests requireAdministrator, so the low-level keyboard hook
+# also works while an elevated window is in the foreground.
+# `dotnet run` cannot be used: it launches via CreateProcess, which cannot elevate
+# and fails with error 740. Start the exe with -Verb RunAs so UAC can kick in.
+$exe = Join-Path $root 'src\AltTabReplacer.App\bin\Debug\net8.0-windows\AltTabReplacer.exe'
+if (-not (Test-Path -LiteralPath $exe)) {
+    Write-Host "  executable not found: $exe" -ForegroundColor Red
+    exit 1
+}
+Start-Process -FilePath $exe -Verb RunAs

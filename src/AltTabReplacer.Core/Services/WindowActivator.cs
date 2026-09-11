@@ -62,4 +62,40 @@ public sealed class WindowActivator
         Thread.Sleep(20);
         keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, IntPtr.Zero);
     }
+
+    /// <summary>
+    /// 把**本进程自己的**窗口强行顶到前台并取得键盘焦点。
+    ///
+    /// 直接 SetForegroundWindow 经常无效：只有"拥有最后一次输入事件"的进程才有权设前台，
+    /// 而低层键盘钩子路径下我们并没有这个权限（没有 WM_HOTKEY 附带的许可）。
+    /// 办法是先 AttachThreadInput 把自己挂到当前前台线程的输入队列上——
+    /// 这时系统认为我们和前台线程是"同一份输入"，SetForegroundWindow 就会被放行。
+    /// </summary>
+    public static void ForceForeground(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return;
+
+        var fg = GetForegroundWindow();
+        if (fg == hwnd) return;
+
+        uint fgThread = GetWindowThreadProcessId(fg, out _);
+        uint myThread = GetCurrentThreadId();
+        bool attached = fgThread != 0 && fgThread != myThread && AttachThreadInput(myThread, fgThread, true);
+        try
+        {
+            ShowWindow(hwnd, SW_SHOW);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            SetFocus(hwnd);
+        }
+        finally
+        {
+            if (attached) AttachThreadInput(myThread, fgThread, false);
+        }
+
+        if (GetForegroundWindow() != hwnd)
+        {
+            Logger.Warn($"ForceForeground 未生效 (HWND=0x{hwnd:X})");
+        }
+    }
 }

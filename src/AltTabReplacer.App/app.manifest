@@ -8,6 +8,23 @@
     </windowsSettings>
   </application>
 
+  <!--
+    必须以管理员身份运行。
+    低层键盘钩子（WH_KEYBOARD_LL）受 UIPI 约束：非提权进程收不到发往更高完整性级别窗口的按键。
+    也就是说不提权的话，任务管理器 / 以管理员身份运行的程序在前台时，Alt+Tab 一定会漏给系统，
+    弹出来的是系统自带的切换器。提权是唯一解法。
+
+    代价：每次启动都会弹 UAC。要免提示开机自启，用「任务计划程序」建一个触发器为登录、
+    并勾选「使用最高权限运行」的任务，不要用启动文件夹或 Run 注册表项。
+  -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
+    <security>
+      <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
       <!-- Windows 10 / 11 -->

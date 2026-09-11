@@ -8,10 +8,10 @@
         ShowInTaskbar="False"
         Topmost="True"
         ResizeMode="NoResize"
-        WindowStartupLocation="CenterScreen"
+        WindowStartupLocation="Manual"
         ShowActivated="True"
         Width="900" Height="600"
-        FocusManager.FocusedElement="{Binding ElementName=PART_SearchBox}">
+        PreviewKeyDown="OnWindowPreviewKeyDown">
     <Grid x:Name="PART_Grid">
         <Border x:Name="PART_Root" CornerRadius="8" Background="#E6202020"
                 KeyDown="OnKeyDown"
@@ -20,16 +20,45 @@
                 PreviewMouseLeftButtonUp="OnPreviewMouseLeftButtonUp">
             <Grid Margin="12">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="320"/>
-                    <ColumnDefinition Width="*"/>
+                    <!-- 按比例分栏：窗口本身随分辨率缩放，固定 320 的侧栏在大屏上会显得很窄 -->
+                    <ColumnDefinition Width="0.36*" MinWidth="280"/>
+                    <ColumnDefinition Width="0.64*"/>
                 </Grid.ColumnDefinitions>
 
-                <!-- 左侧：搜索框 + 列表（图标 + 标题 + 索引） -->
+                <!-- 左侧：面包屑 + 搜索框 + 槽位列表 -->
                 <DockPanel Grid.Column="0" Margin="0,0,8,0">
-                    <!-- 搜索框 -->
-                    <Border DockPanel.Dock="Top" Background="#FF2A2A2A" CornerRadius="4" Padding="8,6" Margin="0,0,0,8">
+
+                    <!-- 面包屑：只在二级/搜索时出现。也是"拖出该组"的落点 -->
+                    <Border x:Name="PART_Breadcrumb" DockPanel.Dock="Top"
+                            Visibility="{Binding BreadcrumbVisibility}"
+                            CornerRadius="4" Padding="8,6" Margin="0,0,0,8"
+                            Background="#FF262626"
+                            BorderThickness="2" BorderBrush="Transparent">
+                        <Border.Style>
+                            <Style TargetType="Border">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding BreadcrumbIsDropTarget}" Value="True">
+                                        <Setter Property="BorderBrush" Value="#FF0078D4"/>
+                                        <Setter Property="Background" Value="#FF13314A"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Border.Style>
+                        <DockPanel>
+                            <TextBlock DockPanel.Dock="Right" Text="Esc 返回"
+                                       Foreground="#FF777777" FontSize="11" VerticalAlignment="Center"/>
+                            <TextBlock Text="{Binding Breadcrumb}" Foreground="#FFDDDDDD"
+                                       FontSize="12" FontWeight="SemiBold"
+                                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                        </DockPanel>
+                    </Border>
+
+                    <!-- 搜索框：只在搜索模式显示，平时它只会白白抢走索引键 -->
+                    <Border DockPanel.Dock="Top" Background="#FF2A2A2A" CornerRadius="4"
+                            Padding="8,6" Margin="0,0,0,8"
+                            Visibility="{Binding SearchHintVisibility}">
                         <Grid>
-                            <TextBlock Text="🔍  搜索 标题或应用名..." Foreground="#FF888888" FontSize="12"
+                            <TextBlock Text="输入以筛选，Esc 退出搜索" Foreground="#FF888888" FontSize="12"
                                        IsHitTestVisible="False"
                                        VerticalAlignment="Center"
                                        x:Name="PART_SearchHint"/>
@@ -37,92 +66,157 @@
                                      Background="Transparent" BorderThickness="0"
                                      Foreground="White" FontSize="13"
                                      CaretBrush="White"
-                                     TextChanged="OnSearchTextChanged"
-                                     PreviewKeyDown="OnSearchBoxPreviewKeyDown"/>
+                                     TextChanged="OnSearchTextChanged"/>
                         </Grid>
                     </Border>
 
-                    <!-- 列表 -->
-                    <ListBox x:Name="PART_List"
-                             ItemsSource="{Binding FilteredCells}"
-                             SelectedItem="{Binding SelectedCell, Mode=TwoWay}"
-                             Background="Transparent"
-                             BorderThickness="0"
-                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                             ScrollViewer.VerticalScrollBarVisibility="Auto"
-                             KeyboardNavigation.DirectionalNavigation="None"
-                             MouseLeftButtonUp="OnMouseLeftButtonUp"
-                             SelectionChanged="OnListSelectionChanged">
-                        <ListBox.ItemContainerStyle>
-                            <Style TargetType="ListBoxItem">
-                                <Setter Property="Background" Value="Transparent"/>
-                                <Setter Property="Padding" Value="0"/>
-                                <Setter Property="Margin" Value="0,1"/>
-                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-                                <Setter Property="Focusable" Value="False"/>
-                                <Setter Property="Template">
-                                    <Setter.Value>
-                                        <ControlTemplate TargetType="ListBoxItem">
-                                            <Border x:Name="RowBorder"
-                                                    Padding="8,6"
-                                                    CornerRadius="3"
-                                                    Background="Transparent">
+                    <!-- 底部操作提示 -->
+                    <TextBlock DockPanel.Dock="Bottom" Margin="2,8,0,0"
+                               Foreground="#FF666666" FontSize="10"
+                               Text="1234/QWER/ASDF/ZXCV 选择 · Enter 确认 · / 搜索 · Esc 返回 · 拖到行中并组"/>
+
+                    <!-- 列表 + 拖放反馈层。
+                         PART_DropLayer 与 PART_List 是兄弟，插入线定位必须转换到共同祖先 PART_ListHost，
+                         转到 PART_DropLayer 会抛 InvalidOperationException（它不是 ListBoxItem 的祖先） -->
+                    <Grid x:Name="PART_ListHost">
+                        <ListBox x:Name="PART_List"
+                                 ItemsSource="{Binding FilteredSlots}"
+                                 SelectedItem="{Binding SelectedSlot, Mode=TwoWay}"
+                                 Background="Transparent"
+                                 BorderThickness="0"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                 KeyboardNavigation.DirectionalNavigation="None"
+                                 MouseLeftButtonUp="OnMouseLeftButtonUp"
+                                 ContextMenuOpening="OnListContextMenuOpening"
+                                 SelectionChanged="OnListSelectionChanged">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="Background" Value="Transparent"/>
+                                    <Setter Property="Padding" Value="0"/>
+                                    <Setter Property="Margin" Value="0,1"/>
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                    <Setter Property="Focusable" Value="False"/>
+                                    <Setter Property="Template">
+                                        <Setter.Value>
+                                            <ControlTemplate TargetType="ListBoxItem">
                                                 <Grid>
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="24"/>
-                                                        <ColumnDefinition Width="*"/>
-                                                        <ColumnDefinition Width="Auto"/>
-                                                    </Grid.ColumnDefinitions>
-                                                    <!-- 图标 -->
-                                                    <Image Grid.Column="0" Width="18" Height="18"
-                                                           Source="{Binding Icon}"
-                                                           HorizontalAlignment="Center"
-                                                           VerticalAlignment="Center"/>
-                                                    <!-- 占位图标 -->
-                                                    <Border Grid.Column="0" Width="18" Height="18"
-                                                            Background="#FF555555" CornerRadius="2"
-                                                            HorizontalAlignment="Center" VerticalAlignment="Center">
-                                                        <Border.Style>
-                                                            <Style TargetType="Border">
-                                                                <Setter Property="Visibility" Value="Collapsed"/>
-                                                                <Style.Triggers>
-                                                                    <DataTrigger Binding="{Binding Icon}" Value="{x:Null}">
-                                                                        <Setter Property="Visibility" Value="Visible"/>
-                                                                    </DataTrigger>
-                                                                </Style.Triggers>
-                                                            </Style>
-                                                        </Border.Style>
-                                                    </Border>
-                                                    <!-- 标题 -->
-                                                    <TextBlock Grid.Column="1" Text="{Binding Title}"
-                                                               Foreground="#FFDDDDDD" FontSize="12"
-                                                               VerticalAlignment="Center"
-                                                               Margin="8,0,0,0"
-                                                               TextTrimming="CharacterEllipsis"/>
-                                                    <!-- 索引标签 -->
-                                                    <Border Grid.Column="2"
-                                                            Background="#CC000000" CornerRadius="3"
-                                                            Padding="6,2" VerticalAlignment="Center">
-                                                        <TextBlock Text="{Binding KeyLabel}"
-                                                                   Foreground="White" FontSize="11" FontWeight="Bold"/>
+                                                    <Border x:Name="RowBorder"
+                                                            Padding="6,5"
+                                                            CornerRadius="4"
+                                                            BorderThickness="2"
+                                                            BorderBrush="Transparent"
+                                                            Background="Transparent">
+                                                        <!-- 右键菜单。ContextMenu 不在可视树上，DataContext 不会自动继承，
+                                                             用 PlacementTarget 手动接上当前行 -->
+                                                        <Border.ContextMenu>
+                                                            <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                                                                <MenuItem Header="重命名…" Click="OnRenameMenuClick"/>
+                                                                <MenuItem Header="解散分组" Click="OnDissolveMenuClick"/>
+                                                            </ContextMenu>
+                                                        </Border.ContextMenu>
+                                                        <Grid>
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="4"/>
+                                                                <ColumnDefinition Width="34"/>
+                                                                <ColumnDefinition Width="*"/>
+                                                                <ColumnDefinition Width="Auto"/>
+                                                                <ColumnDefinition Width="Auto"/>
+                                                            </Grid.ColumnDefinitions>
+
+                                                            <!-- 组色带：组行独有的左侧竖条 -->
+                                                            <Border Grid.Column="0" Width="3" CornerRadius="1.5"
+                                                                    Background="#FF0078D4"
+                                                                    Visibility="{Binding GroupVisibility}"
+                                                                    VerticalAlignment="Stretch" Margin="0,1"/>
+
+                                                            <!-- 窗口行：单个大图标 -->
+                                                            <Image Grid.Column="1" Width="20" Height="20"
+                                                                   Source="{Binding Icon}"
+                                                                   Visibility="{Binding WindowVisibility}"
+                                                                   HorizontalAlignment="Center"
+                                                                   VerticalAlignment="Center"/>
+
+                                                            <!-- 组行：2×2 图标网格 -->
+                                                            <ItemsControl Grid.Column="1"
+                                                                          ItemsSource="{Binding Icons}"
+                                                                          Visibility="{Binding GroupVisibility}"
+                                                                          Width="26" Height="26"
+                                                                          HorizontalAlignment="Center"
+                                                                          VerticalAlignment="Center">
+                                                                <ItemsControl.ItemsPanel>
+                                                                    <ItemsPanelTemplate>
+                                                                        <UniformGrid Rows="2" Columns="2"/>
+                                                                    </ItemsPanelTemplate>
+                                                                </ItemsControl.ItemsPanel>
+                                                                <ItemsControl.ItemTemplate>
+                                                                    <DataTemplate>
+                                                                        <Image Source="{Binding}" Width="11" Height="11"
+                                                                               Margin="1" Stretch="Uniform"/>
+                                                                    </DataTemplate>
+                                                                </ItemsControl.ItemTemplate>
+                                                            </ItemsControl>
+
+                                                            <!-- 名称 -->
+                                                            <TextBlock Grid.Column="2" Text="{Binding Name}"
+                                                                       Foreground="#FFDDDDDD" FontSize="12"
+                                                                       VerticalAlignment="Center"
+                                                                       Margin="8,0,0,0"
+                                                                       TextTrimming="CharacterEllipsis"/>
+
+                                                            <!-- 成员数徽标 + 下一级箭头 -->
+                                                            <StackPanel Grid.Column="3" Orientation="Horizontal"
+                                                                        VerticalAlignment="Center"
+                                                                        Visibility="{Binding GroupVisibility}">
+                                                                <TextBlock Text="{Binding CountBadge}"
+                                                                           Foreground="#FF9ACBF0" FontSize="10"
+                                                                           VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                                                <TextBlock Text="›" Foreground="#FF9ACBF0"
+                                                                           FontSize="15" FontWeight="Bold"
+                                                                           VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                                            </StackPanel>
+
+                                                            <!-- 索引键标签 -->
+                                                            <Border Grid.Column="4"
+                                                                    Background="#CC000000" CornerRadius="3"
+                                                                    Padding="6,2" VerticalAlignment="Center"
+                                                                    MinWidth="22">
+                                                                <TextBlock Text="{Binding KeyLabel}"
+                                                                           Foreground="White" FontSize="11" FontWeight="Bold"
+                                                                           HorizontalAlignment="Center"/>
+                                                            </Border>
+                                                        </Grid>
                                                     </Border>
                                                 </Grid>
-                                            </Border>
-                                            <ControlTemplate.Triggers>
-                                                <Trigger Property="IsMouseOver" Value="True">
-                                                    <Setter TargetName="RowBorder" Property="Background" Value="#33FFFFFF"/>
-                                                </Trigger>
-                                                <Trigger Property="IsSelected" Value="True">
-                                                    <Setter TargetName="RowBorder" Property="Background" Value="#FF0078D4"/>
-                                                    <Setter TargetName="RowBorder" Property="Padding" Value="8,6"/>
-                                                </Trigger>
-                                            </ControlTemplate.Triggers>
-                                        </ControlTemplate>
-                                    </Setter.Value>
-                                </Setter>
-                            </Style>
-                        </ListBox.ItemContainerStyle>
-                    </ListBox>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="RowBorder" Property="Background" Value="#33FFFFFF"/>
+                                                    </Trigger>
+                                                    <Trigger Property="IsSelected" Value="True">
+                                                        <Setter TargetName="RowBorder" Property="Background" Value="#FF0078D4"/>
+                                                    </Trigger>
+                                                    <!-- 拖动落在行中部 = 并入本行：整行套一圈描边 -->
+                                                    <DataTrigger Binding="{Binding IsDropTarget}" Value="True">
+                                                        <Setter TargetName="RowBorder" Property="BorderBrush" Value="#FF4CC2FF"/>
+                                                        <Setter TargetName="RowBorder" Property="Background" Value="#FF13314A"/>
+                                                    </DataTrigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Setter.Value>
+                                    </Setter>
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                        </ListBox>
+
+                        <!-- 排序插入线。IsHitTestVisible=False，不干扰拖动命中测试 -->
+                        <Canvas x:Name="PART_DropLayer" IsHitTestVisible="False">
+                            <Grid x:Name="PART_InsertLine" Visibility="Collapsed" Height="8">
+                                <Border Height="2" Background="#FF4CC2FF" VerticalAlignment="Center"/>
+                                <Ellipse Width="6" Height="6" Fill="#FF4CC2FF" HorizontalAlignment="Left"/>
+                                <Ellipse Width="6" Height="6" Fill="#FF4CC2FF" HorizontalAlignment="Right"/>
+                            </Grid>
+                        </Canvas>
+                    </Grid>
                 </DockPanel>
 
                 <!-- 右侧：实时预览当前选中窗口 -->

@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Windows;
 using System.Windows.Interop;
+using System.Windows.Threading;
 using AltTabReplacer.Core.Infrastructure;
 using AltTabReplacer.Core.Models;
 using AltTabReplacer.Core.Services;
@@ -14,7 +15,7 @@ namespace AltTabReplacer;
 /// <summary>
 /// 应用入口。
 /// 两种运行模式：
-///   1) 默认（无参数）：后台常驻 + 监听热键 Alt+Z
+///   1) 默认（无参数）：后台常驻 + 接管 Alt+Tab（替代系统任务切换器）
 ///   2) --config：打开规则配置窗口（前台模式，不监听热键）
 /// </summary>
 public partial class App : System.Windows.Application
@@ -22,6 +23,7 @@ public partial class App : System.Windows.Application
     private Settings? _settings;
     private RuleStore? _ruleStore;
     private RuleEngine? _ruleEngine;
+    private LayoutStore? _layoutStore;
     private WindowEnumerator? _enumerator;
     private WindowActivator? _activator;
     private WindowCaptureService? _capture;
@@ -29,13 +31,32 @@ public partial class App : System.Windows.Application
     private HostWindow? _hostWindow;
     private SelectorWindow? _selector;
     private LowLevelKeyboardHook? _llHook;
+    private DispatcherTimer? _hookWatchdog;
+    private bool _hookWasInstalled = true;
     private WinForms.NotifyIcon? _trayIcon;
     private volatile bool _selectorActive;
+    /// <summary>搜索模式下必须放行索引键，否则搜索框一个字都打不进去。</summary>
+    private volatile bool _searchMode;
     private string? _rulesPath;
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        // 常驻托盘程序最糟的失败方式是"悄悄消失"。UI 线程上任何漏网的异常
+        // 都会直接终止进程，所以统一记日志并吞掉——留一条可查的痕迹，总好过让用户
+        // 面对一个无缘无故不见了的热键。
+        DispatcherUnhandledException += (_, args) =>
+        {
+            Logger.Error("未处理的 UI 异常（已拦截，程序继续运行）", args.Exception);
+            args.Handled = true;
+        };
+
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+        {
+            if (args.ExceptionObject is Exception ex)
+                Logger.Error("未处理的域异常", ex);
+        };
 
         try
         {
@@ -54,6 +75,15 @@ public partial class App : System.Windows.Application
                 "AltTabReplacer", "rules.json");
             _ruleStore = new RuleStore(_rulesPath);
             _ruleStore.Load();
+
+            // 3b) 旧版把顺序编码进 rules.json 的 Priority，现在顺序由 layout.json 接管，
+            //     残留的排序规则只会干扰排除规则的阅读，启动时清掉一次
+            int purged = _ruleStore.PurgeLegacyOrderRules();
+            if (purged > 0) Logger.Info($"已清理 {purged} 条旧版排序规则（顺序改由 layout.json 管理）");
+
+            // 4) 加载槽位布局
+            _layoutStore = new LayoutStore(LayoutStore.DefaultPath);
+            _layoutStore.Load();
 
             if (configMode)
             {
@@ -74,6 +104,9 @@ public partial class App : System.Windows.Application
 
     private void RunBackgroundMode()
     {
+        TryRaiseProcessPriority();
+        LogElevationState();
+
         // 服务装配
         _ruleEngine = new RuleEngine(_ruleStore!);
         _activator = new WindowActivator();
@@ -102,29 +135,140 @@ public partial class App : System.Windows.Application
         _hotkey.HotkeyReleased += OnHotkeyReleased;
         Logger.Info($"初始化完成，等待热键 {_settings.Hotkey.Modifiers} + {_settings.Hotkey.Key}");
 
-        // 6) 全局低层键盘钩子：仅在选择器显示期间拦截 123/QWE
-        // 关键：绕开 IME（中文输入法在应用层拦截键盘事件）
+        // 6) 全局低层键盘钩子，两个职责：
+        //    a) 吞掉 Alt+Tab —— 系统保留组合，RegisterHotKey 注册不到，只有在这里截下来
+        //       系统任务切换器才不会弹出（即"替换系统 Alt+Tab"）
+        //    b) 选择器显示期间截 16 个索引键，绕开 IME（中文输入法在应用层拦截键盘事件）
         _llHook = new LowLevelKeyboardHook();
-        _llHook.Install(vk =>
+        bool hookOk = _llHook.Install(e =>
         {
             // hook 线程：只能做"原子"判断
-            if (!_selectorActive) return false;
-            return Core.KeyMap.ToIndex(vk).HasValue;
+            if (_hotkey!.TryHandleHookKey(e)) return LowLevelKeyboardHook.HookAction.Swallow;
+            if (!_selectorActive || !e.IsDown) return LowLevelKeyboardHook.HookAction.Pass;
+            // 搜索模式下索引键要留给文本输入，不能再吞
+            if (_searchMode) return LowLevelKeyboardHook.HookAction.Pass;
+            return Core.KeyMap.ToIndex(e.Vk).HasValue
+                ? LowLevelKeyboardHook.HookAction.SwallowAndObserve
+                : LowLevelKeyboardHook.HookAction.Pass;
         });
-        _llHook.KeyObserved += vk =>
+        _llHook.KeyObserved += e =>
         {
             // 投回 WPF 线程
-            Dispatcher.BeginInvoke(() => _selector?.HandleVk(vk));
+            Dispatcher.BeginInvoke(() => _selector?.HandleVk(e.Vk));
         };
+
+        if (!hookOk && _hotkey.IsHookMode)
+        {
+            System.Windows.MessageBox.Show(
+                $"无法安装全局键盘钩子，{HotkeyLabel} 不会被接管（系统自带的任务切换器仍会弹出）。\n\n" +
+                "请检查是否有安全软件拦截，或以管理员身份重新运行。",
+                "AltTabReplacer", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        StartHookWatchdog();
 
         // 7) 托盘图标 + 右键菜单
         SetupTrayIcon();
     }
 
+    /// <summary>
+    /// 定期重挂低层键盘钩子，把自己顶回钩子链头部。
+    /// 钩子链是"后装的先调用"，任何后启动、也挂了键盘钩子的程序都会排在我们前面并可能吞掉 Alt+Tab；
+    /// 重挂一次即可抢回。顺带也能从"被系统静默摘钩"里自愈。
+    ///
+    /// 重挂的瞬间有个极短空窗期，这期间的 Alt+Tab 会漏给系统，所以按着修饰键时跳过这一轮。
+    /// </summary>
+    private void StartHookWatchdog()
+    {
+        _hookWatchdog = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+        {
+            Interval = TimeSpan.FromSeconds(3),
+        };
+        _hookWatchdog.Tick += (_, __) =>
+        {
+            if (_llHook == null) return;
+
+            // 掉钩子是"静默"的：没有任何回调或通知，只能靠状态自己发现
+            bool installed = _llHook.IsInstalled;
+            if (installed != _hookWasInstalled)
+            {
+                _hookWasInstalled = installed;
+                if (installed) Logger.Info("键盘钩子已恢复");
+                else Logger.Error($"键盘钩子丢失！Alt+Tab 此刻无法接管 (err={_llHook.LastInstallError})");
+            }
+
+            if (AnyModifierDown()) return;      // 别在用户正按着 Alt 的时候拆钩子
+            _llHook.Reinstall();
+        };
+        _hookWatchdog.Start();
+    }
+
+    private static bool AnyModifierDown()
+    {
+        // VK_SHIFT / VK_CONTROL / VK_MENU / VK_LWIN / VK_RWIN
+        foreach (int vk in new[] { 0x10, 0x11, 0x12, 0x5B, 0x5C })
+        {
+            if ((GetAsyncKeyState(vk) & 0x8000) != 0) return true;
+        }
+        return false;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    /// <summary>
+    /// 低层键盘钩子的回调必须在 LowLevelHooksTimeout（默认 300ms）内返回，否则系统静默摘钩。
+    /// 被别的进程抢 CPU 是最常见的超时原因，所以把自己的优先级抬一档。
+    /// </summary>
+    private static void TryRaiseProcessPriority()
+    {
+        try
+        {
+            Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.AboveNormal;
+            Logger.Info("进程优先级已提升到 AboveNormal");
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"提升进程优先级失败: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 非管理员身份运行时，低层键盘钩子收不到发往**更高完整性级别**窗口的按键
+    /// （任务管理器、以管理员身份运行的程序、UAC 安全桌面等）。
+    /// 这类窗口在前台时 Alt+Tab 会漏给系统，弹出来的是系统自带的切换器——
+    /// 这是"在某些程序里热键失灵"最常见的原因，且**只能靠本程序也提权**来解决。
+    /// </summary>
+    private static void LogElevationState()
+    {
+        try
+        {
+            using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+            var principal = new System.Security.Principal.WindowsPrincipal(identity);
+            if (principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator))
+            {
+                Logger.Info("以管理员身份运行：提权窗口在前台时热键依然有效");
+            }
+            else
+            {
+                Logger.Warn("非管理员身份运行：提权窗口（任务管理器等）在前台时 Alt+Tab 无法接管");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"检测提权状态失败: {ex.Message}");
+        }
+    }
+
+    /// <summary>供 UI 文案使用的热键显示名，例如 "Alt+Tab"。</summary>
+    private string HotkeyLabel =>
+        $"{_settings!.Hotkey.Modifiers}+{_settings.Hotkey.Key}".Replace(" ", "").Replace(",", "+");
+
     private void SetupTrayIcon()
     {
         var menu = new WinForms.ContextMenuStrip();
-        menu.Items.Add("显示选择器 (Alt+Z)", null, (_, __) => OnHotkeyPressed());
+        menu.Items.Add($"显示选择器 ({HotkeyLabel})", null, (_, __) => OnHotkeyPressed());
+        menu.Items.Add("重置分组与顺序", null, (_, __) => ResetLayout());
         menu.Items.Add("打开规则配置", null, (_, __) => LaunchConfigInNewProcess());
         menu.Items.Add(new WinForms.ToolStripSeparator());
         menu.Items.Add("退出", null, (_, __) =>
@@ -136,7 +280,7 @@ public partial class App : System.Windows.Application
         _trayIcon = new WinForms.NotifyIcon
         {
             Icon = System.Drawing.SystemIcons.Application,
-            Text = "AltTabReplacer — Alt+Z 唤起",
+            Text = $"AltTabReplacer — {HotkeyLabel} 唤起",
             Visible = true,
             ContextMenuStrip = menu,
         };
@@ -154,6 +298,18 @@ public partial class App : System.Windows.Application
                 LaunchConfigInNewProcess();
             }
         }
+    }
+
+    /// <summary>清空 layout.json，回到"全部按 z-order + 自动折叠"的初始状态。</summary>
+    private void ResetLayout()
+    {
+        var r = System.Windows.MessageBox.Show(
+            "将清空所有手动分组和拖动排序，回到按最近使用顺序自动排列。\n\n确定吗？",
+            "AltTabReplacer", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (r != MessageBoxResult.Yes) return;
+
+        _layoutStore?.Save(new Core.Models.LayoutDocument());
+        Logger.Info("用户重置了分组与顺序");
     }
 
     private void RunConfigMode()
@@ -200,6 +356,8 @@ public partial class App : System.Windows.Application
             _trayIcon = null;
         }
         _llHook?.Dispose();
+        _hookWatchdog?.Stop();
+        _hookWatchdog = null;
         _hotkey?.Dispose();
         _hostWindow?.Close();
         base.OnExit(e);
@@ -213,14 +371,16 @@ public partial class App : System.Windows.Application
     {
         try
         {
-            // toggle: 第二次按 Alt+Z → 关闭选择器
+            // 选择器已打开时再按热键 = 关闭，和 Esc 完全一致
             if (_selector != null && _selector.IsVisible)
             {
+                Logger.Info("热键再次按下，关闭选择器");
                 _selectorActive = false;
                 _selector.Cancel();
                 return;
             }
 
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             var windows = _enumerator!.Enumerate();
             if (windows.Count == 0)
             {
@@ -228,12 +388,33 @@ public partial class App : System.Windows.Application
                 return;
             }
 
-            _selector = new SelectorWindow(windows, _capture!, _settings!);
-            _selector.Closed += (_, __) => _selectorActive = false;
-            _selector.OrderChanged += OnSelectorOrderChanged;
+            // 枚举结果 + 持久化布局 → 实际的 16 槽位树（含自动折叠、溢出组）
+            var slots = LayoutResolver.Resolve(
+                windows,
+                _layoutStore!.Current,
+                _settings!.Layout.AutoGroupThreshold,
+                Core.KeyMap.Size);
+
+            // 不在这里抢前台。HostWindow 是 Visibility=Hidden 的 0x0 窗口，把它顶到前台
+            // 既要 SW_SHOW 一个本该隐藏的窗口，又会把已打开的选择器挤失焦触发自动关闭。
+            // 抢前台统一放在 Show() 之后、直接作用在选择器上（AttachThreadInput 本来就不依赖
+            // 本进程当前是不是前台）。
+            _selector = new SelectorWindow(windows, slots, _capture!, _settings!);
+            _selector.Closed += (_, __) => { _selectorActive = false; _searchMode = false; };
+            _selector.LayoutChanged += OnSelectorLayoutChanged;
+            _selector.SearchModeChanged += on => _searchMode = on;
             _selectorActive = true;
             _selector.Show();
-            Logger.Info($"选择器显示: {windows.Count} 个窗口");
+
+            // Show() 之后再强制一次：窗口句柄这时才存在，而且导航键全靠键盘焦点
+            WindowActivator.ForceForeground(new WindowInteropHelper(_selector).Handle);
+
+            // 耗时要盯着：这条路径上要截图，很容易几百毫秒。
+            // 钩子已经挪到专用线程，UI 卡顿不会再摘掉钩子，但太慢依然会让人觉得"按了没反应"。
+            long ms = sw.ElapsedMilliseconds;
+            int groups = slots.Count(s => s.Kind == Core.Models.SlotKind.Group);
+            if (ms > 300) Logger.Warn($"选择器显示: {windows.Count} 窗口 / {slots.Count} 槽位（{groups} 组），耗时 {ms}ms（偏慢）");
+            else Logger.Info($"选择器显示: {windows.Count} 窗口 / {slots.Count} 槽位（{groups} 组），耗时 {ms}ms");
         }
         catch (Exception ex)
         {
@@ -243,31 +424,21 @@ public partial class App : System.Windows.Application
 
     /// <summary>
     /// Quick-Switcher 模式：修饰键释放不关闭选择器。
-    /// 仅在用户主动操作（点击 / 按数字键 / Esc / 再次按 Alt+Z）时关闭。
+    /// 仅在用户主动操作（点击 / 按索引键 / Enter / Esc / 再次按热键）时关闭。
     /// </summary>
     private void OnHotkeyReleased()
     {
         // 故意为空：保持选择器显示
     }
-
-    /// <summary>把 SelectorWindow 中的当前顺序写回 RuleStore（用 Priority 数值控制位置）。</summary>
-    private void OnSelectorOrderChanged(IReadOnlyList<ViewModels.WindowCellViewModel> cells)
+    /// <summary>
+    /// 拖动产生的新布局（分组 / 排序）写回 layout.json。
+    /// 溢出组会在 ToDocument 里被摊平，不会被固化成一个真的组。
+    /// </summary>
+    private void OnSelectorLayoutChanged(IReadOnlyList<ResolvedSlot> slots)
     {
-        if (_ruleStore == null || cells.Count == 0) return;
-        var newRules = new List<Core.Models.SortRule>(cells.Count);
-        // 列表前部 Priority 高，RuleEngine 严格按 Priority 降序排
-        for (int i = 0; i < cells.Count; i++)
-        {
-            newRules.Add(new Core.Models.SortRule
-            {
-                MatchType = Core.Models.MatchType.ProcessName,
-                Pattern = cells[i].Info.ProcessName,
-                Priority = (cells.Count - i) * 100,
-                IsPinned = false,
-                IsExcluded = false,
-            });
-        }
-        _ruleStore.ReplaceProcessNameRules(newRules);
-        Logger.Info($"已持久化新顺序: {newRules.Count} 条规则（前部 Priority={newRules[0].Priority}）");
+        if (_layoutStore == null || slots.Count == 0) return;
+        var doc = LayoutResolver.ToDocument(slots);
+        _layoutStore.Save(doc);
+        Logger.Info($"已持久化布局: {doc.Slots.Count} 个槽位");
     }
 }

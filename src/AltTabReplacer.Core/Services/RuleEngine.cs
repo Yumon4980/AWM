@@ -12,12 +12,13 @@ public interface IRuleEngine
 }
 
 /// <summary>
-/// 应用置顶 / 排除 / 优先级规则。
+/// 只负责**排除**。
 ///
-/// 应用顺序：
-///   1) 排除（命中 IsExcluded 的窗口直接丢弃）
-///   2) 置顶（命中 IsPinned 的窗口移到最前，组内保持原 z-order）
-///   3) Priority 降序排序（同 Priority 保持 z-order 倒序）
+/// 排序职责已经整个移交给 <see cref="LayoutStore"/> + <see cref="LayoutResolver"/>。
+/// 旧版把顺序编码进 <see cref="SortRule.Priority"/> 的做法有个绕不过去的坑：
+/// 一个进程开多个窗口时会写出多条同 Pattern、不同 Priority 的规则，
+/// 而"取命中规则的最大值"会把该进程的每一个窗口都抬到它占过的最高位置，
+/// 顺序看起来就像没被记住。现在顺序由布局树显式表达，不再有这个歧义。
 /// </summary>
 public sealed class RuleEngine : IRuleEngine
 {
@@ -33,27 +34,10 @@ public sealed class RuleEngine : IRuleEngine
         var rules = _store.Current;
         if (rules.Count == 0) return raw;
 
-        // 1) 排除
-        var filtered = raw.Where(w => !rules.Any(r => r.IsExcluded && Match(r, w))).ToList();
-        if (filtered.Count == 0) return filtered;
+        var excluders = rules.Where(r => r.IsExcluded).ToList();
+        if (excluders.Count == 0) return raw;
 
-        // 2) 每个窗口的 effective priority = 命中规则中的最大 Priority
-        //    （不依赖 IsPinned：纯 Priority 数值排序，方便运行时改写）
-        int PriorityOf(WindowInfo w)
-        {
-            var hits = rules.Where(r => !r.IsExcluded && Match(r, w)).Select(r => r.Priority);
-            return hits.Any() ? hits.Max() : 0;
-        }
-
-        // 3) 按 effective priority 降序；同 priority 保持 z-order 倒序
-        var sorted = filtered
-            .Select((w, i) => (Window: w, OriginalIndex: i, Pri: PriorityOf(w)))
-            .OrderByDescending(x => x.Pri)
-            .ThenBy(x => x.OriginalIndex)
-            .Select(x => x.Window)
-            .ToList();
-
-        return sorted;
+        return raw.Where(w => !excluders.Any(r => Match(r, w))).ToList();
     }
 
     private static bool Match(SortRule rule, WindowInfo w)

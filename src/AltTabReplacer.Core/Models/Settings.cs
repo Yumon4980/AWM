@@ -21,17 +21,29 @@ public sealed class Settings
 
     public sealed class HotkeyConfig
     {
-        public string Modifiers { get; set; } = "Ctrl, Alt";   // 修饰键，逗号分隔
+        public string Modifiers { get; set; } = "Alt";        // 修饰键，逗号分隔
         public string Key { get; set; } = "Tab";              // 主键（VK 名）
     }
+
 
     public sealed class LayoutConfig
     {
         public int CellWidth { get; set; } = 256;
         public int CellHeight { get; set; } = 144;
         public int CellPadding { get; set; } = 8;
-        public int MaxColumns { get; set; } = 10;
-        public int MaxPerPage { get; set; } = 35;
+        public int MaxColumns { get; set; } = 4;
+
+        /// <summary>
+        /// 同一进程开了几个窗口就自动折叠成一个组。
+        /// 设成很大的数（如 99）等于关闭自动分组，每个窗口各占一个槽位。
+        /// </summary>
+        public int AutoGroupThreshold { get; set; } = 2;
+
+        /// <summary>选择器宽度占主显示器工作区的比例（0~1）。与分辨率解耦。</summary>
+        public double WidthRatio { get; set; } = 0.5;
+
+        /// <summary>选择器高度占主显示器工作区的比例（0~1）。</summary>
+        public double HeightRatio { get; set; } = 0.55;
     }
 
     public sealed class ThemeConfig

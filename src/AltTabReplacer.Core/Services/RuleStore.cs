@@ -86,15 +86,21 @@ public sealed class RuleStore
         Save();
     }
 
-    /// <summary>用 newRules 替换所有 MatchType=ProcessName 的规则（保留 IsExcluded 等其他规则）。</summary>
-    public void ReplaceProcessNameRules(IEnumerable<SortRule> newRules)
+    /// <summary>
+    /// 清掉所有自动生成过的排序规则。
+    /// 布局已经由 <see cref="LayoutStore"/> 接管，旧版写进 rules.json 的
+    /// ProcessName 排序规则不再有意义，留着只会干扰排除规则的阅读。
+    /// 用户手写的 WindowTitle / Regex 规则和任何 IsExcluded 规则都保留。
+    /// </summary>
+    public int PurgeLegacyOrderRules()
     {
+        int removed;
         lock (_lock)
         {
-            _rules.RemoveAll(r => r.MatchType == MatchType.ProcessName);
-            _rules.AddRange(newRules);
+            removed = _rules.RemoveAll(r => !r.IsExcluded && r.MatchType == MatchType.ProcessName);
         }
-        Save();
+        if (removed > 0) Save();
+        return removed;
     }
 
     public void Save()

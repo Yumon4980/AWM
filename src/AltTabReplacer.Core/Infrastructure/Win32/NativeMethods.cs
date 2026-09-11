@@ -117,6 +117,17 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 
+    /// <summary>把本线程的输入队列挂到目标线程，用于绕开 SetForegroundWindow 的前台锁。</summary>
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, [MarshalAs(UnmanagedType.Bool)] bool fAttach);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetFocus(IntPtr hWnd);
+
     // ============================================================
     //  Keyboard state (for modifier release detection)
     // ============================================================
@@ -146,6 +157,56 @@ internal static class NativeMethods
 
     [DllImport("comctl32.dll", EntryPoint = "#413")]
     public static extern IntPtr DefSubclassProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam);
+
+    // ============================================================
+    //  Icon
+    // ============================================================
+
+    public const int GCLP_HICON = -14;
+    public const int GCLP_HICONSM = -34;
+
+    public const uint SHGFI_ICON = 0x000000100;
+    public const uint SHGFI_LARGEICON = 0x000000000;
+    public const uint SHGFI_SMALLICON = 0x000000001;
+
+    [DllImport("user32.dll", EntryPoint = "GetClassLongPtrW", SetLastError = true)]
+    private static extern IntPtr GetClassLongPtr64(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "GetClassLongW", SetLastError = true)]
+    private static extern uint GetClassLongPtr32(IntPtr hWnd, int nIndex);
+
+    /// <summary>GetClassLongPtr 在 32/64 位下导出名不同，这里统一。</summary>
+    public static IntPtr GetClassLongPtr(IntPtr hWnd, int nIndex) =>
+        IntPtr.Size == 8
+            ? GetClassLongPtr64(hWnd, nIndex)
+            : (IntPtr)(uint)GetClassLongPtr32(hWnd, nIndex);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    public static extern uint ExtractIconEx(string lpszFile, int nIconIndex,
+        IntPtr[] phiconLarge, IntPtr[] phiconSmall, uint nIcons);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DestroyIcon(IntPtr hIcon);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr CopyIcon(IntPtr hIcon);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct SHFILEINFO
+    {
+        public IntPtr hIcon;
+        public int iIcon;
+        public uint dwAttributes;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szDisplayName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)]
+        public string szTypeName;
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr SHGetFileInfo(string pszPath, uint dwFileAttributes,
+        ref SHFILEINFO psfi, uint cbFileInfo, uint uFlags);
 
     // ============================================================
     //  DWM (缩略图 / Cloaked)

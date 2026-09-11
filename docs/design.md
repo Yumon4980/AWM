@@ -247,9 +247,54 @@ sequenceDiagram
 ## 5. 关键技术细节
 
 ### 5.1 全局热键
-- 使用 `RegisterHotKey(hwnd, id, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_TAB)`
-- 选择器可见期间，需要把 `Tab` 键从系统传递中"屏蔽"——通过在 `SelectorWindow.PreviewKeyDown` 中 `e.Handled = true` 即可（焦点已在选择器内）
-- 修饰键释放（`Ctrl` / `Alt` 任一松开）→ 立即切到当前高亮并隐藏选择器
+- 默认热键是 `Alt+Tab`，目标是**替换系统自带的任务切换器**
+- `Alt+Tab`（以及 `Alt+Esc`）是系统保留组合，**`RegisterHotKey` 注册不到**，即使返回成功也收不到 `WM_HOTKEY`。
+  因此走 `WH_KEYBOARD_LL` 低层键盘钩子：`Tab` 在 `Alt` 按下时以 `WM_SYSKEYDOWN` 到达钩子，
+  回调里返回 `1` 把它吞掉，系统任务切换器收不到按键就不会弹出
+- 其它组合（用户在 `settings.json` 里自定义的）仍走 `RegisterHotKey(hwnd, id, mods | MOD_NOREPEAT, vk)` + 窗口子类化拦 `WM_HOTKEY`
+- 钩子路径下没有 `WM_HOTKEY` 附带的"设前台"许可，需要 `AttachThreadInput` 挂到当前前台线程后再 `SetForegroundWindow`，否则会被前台锁拒绝
+- 钩子回调必须快速返回（超过 `LowLevelHooksTimeout`，默认 300ms，系统会静默摘钩），只做判断 + `Dispatcher.BeginInvoke` 投递
+- 限制：低层钩子对 UAC 提权窗口与安全桌面无效，除非本程序也以管理员身份运行
+- 选择器可见期间的导航键（`Tab` / `Shift+Tab` / `↑` / `↓` / `Enter` / `Esc` / `PageUp` / `PageDown`）统一在
+  `SelectorWindow` 的**窗口级 `PreviewKeyDown`** 里处理：焦点在搜索框上，`Tab` 会先被 WPF 焦点导航吃掉，
+  冒泡的 `KeyDown` 收不到，必须在隧道阶段截
+- **`Alt` 还按着时必须读 `e.SystemKey`**：WPF 会把 Alt 组合键报成 `e.Key == Key.System`，真正的键在 `SystemKey` 里。
+  只看 `e.Key` 的话方向键会全部漏过去，最终被 `DefWindowProc` 拿去激活窗口菜单（移动/大小/关闭），
+  焦点被抢走后导航就彻底失效。另外还要吞掉 `WM_SYSCOMMAND` 的 `SC_KEYMENU`，堵住其余 Alt 组合触发菜单的路径
+- 选择器已打开时再次按热键 = **关闭**，与 `Esc` 同义（toggle）。
+  代价是"按住 `Alt` 连点 `Tab` 往下走"的经典手感没有了：`Alt` 还按着时 `Tab` 就是 `Alt+Tab`，
+  必然走热键路径。要用 `Tab` 导航得先松开 `Alt`
+- **抢前台只能在"确定要开"之后做，且只能作用在选择器自己身上。**
+  踩过的坑：`HotkeyService` 在通知订阅方之前先把 `HostWindow` 顶到前台，
+  这会让已打开的选择器失焦 → 触发"失焦即关闭" → 等 `HotkeyPressed` 真正执行时
+  它看到的已经是"没开" → 于是又新开一个。一次按键变成**先关后开**，toggle 永远关不掉。
+  另外 `HostWindow` 是 `Visibility=Hidden` 的 0×0 窗口，把它设前台还得先 `SW_SHOW` 一个本该隐藏的窗口。
+  正确做法：热键回调只负责通知；抢前台放在 `Show()` 之后直接作用在选择器上
+  （`AttachThreadInput` 本来就不依赖本进程当前是不是前台）
+- 修饰键释放**不**关闭选择器（Quick-Switcher 模式）：只有点击 / 按索引键 / `Enter` / `Esc` / 再次按热键才关闭
+- 选择器**失焦即关闭**（`Window.Deactivated`）：导航键走 WPF 键盘路径，没有焦点就全是死的，
+  留一个不响应的浮窗挡在屏幕上比直接关掉更糟。所有关闭路径统一收敛到带 `_closing` 重入保护的出口——
+  切到目标窗口本身就会触发 `Deactivated`，不加保护会重入 `Close()`
+
+### 5.1.1 钩子优先级与自愈
+
+"热键有时候突然不灵"有四个独立成因，对应四条措施：
+
+| 成因 | 表现 | 措施 |
+|---|---|---|
+| **抬键闩锁卡死** | 用户先松 `Alt` 再松 `Tab` 时，`Tab` 的 keyup 里 `Alt` 已经是 false。若先判修饰键再处理抬键，`_hookKeyHeld` 会永远停在 true，**下一次热键被当成"自动重复"静默吞掉**，表现为隔一次失灵一次 | `TryHandleHookKey` 里**无条件先处理抬键**；未被吞掉的按下也顺手清闩锁 |
+| **UI 线程饿死钩子** | LL 钩子回调是"投递消息到装钩子的线程"执行的。挂在 WPF UI 线程上时，打开选择器要对 20+ 窗口逐个 `PrintWindow`，轻松几百毫秒，期间回调派发不出去，超过 `LowLevelHooksTimeout`（默认 300ms）系统直接跳过甚至摘钩 | 钩子改到**专用线程**上，线程里自跑 `GetMessage` 循环，常年空转不受 UI 影响 |
+| 钩子链顺序 | 后启动的程序也挂了键盘钩子，排在我们前面把 `Alt+Tab` 吞了 | 定时**重挂**钩子回到链头（链是"后装的先调用"），通过 `PostThreadMessage` 让钩子线程自己重挂 |
+| UIPI / 完整性级别 | 提权窗口（任务管理器等）在前台时，非提权进程的钩子**根本收不到**按键 | 以管理员身份运行（`app.manifest` 的 `requestedExecutionLevel`） |
+
+重挂有个极短空窗期，这期间的 `Alt+Tab` 会漏给系统，所以按着修饰键时跳过该轮。
+
+> **钩子回调里绝对不能写日志。** `Logger` 是同步文件 IO（每次 `AppendAllText` 开关文件一次），
+> 放进回调就是往 300ms 预算里塞不可控的磁盘延迟。需要记录的一律 `Dispatcher.BeginInvoke` 到 UI 线程再写。
+
+**可观测性**：失败的触发原本在日志里**不留任何痕迹**，三种失败（钩子掉了 / 被闩锁吞了 / 弹出后瞬间失焦自关）
+长得一模一样，没法排查。现在补了：热键触发、钩子丢失/恢复、选择器失焦自动关闭、选择器打开耗时（>300ms 报 WARN）。
+
 
 ### 5.2 窗口枚举与过滤
 **调用**：`EnumWindows(EnumWindowsProc, IntPtr.Zero)`
@@ -292,29 +337,95 @@ Windows 限制：只有前台进程能把窗口设为前台。
 
 **重试**：最多 3 次，每次间隔 50ms。
 
-### 5.5 键盘 123QWE 索引映射（与 Alt-Tab Terminator 一致）
-按 QWERTY **物理位置** 排列，**不**按字母序：
+### 5.5 键盘索引映射：16 键 4×4
+按 QWERTY **物理位置** 取左手主键区一个完整方块，物理位置和界面网格一一对应：
 
 | 行 | Virtual Key | 索引 |
 |---|---|---|
-| 数字 | `VK_1` … `VK_9` | 0–8 |
-| Q 行 | `VK_Q` `VK_W` `VK_E` `VK_R` `VK_T` `VK_Y` `VK_U` `VK_I` `VK_O` `VK_P` | 9–18 |
-| A 行 | `VK_A` `VK_S` `VK_D` `VK_F` `VK_G` `VK_H` `VK_J` `VK_K` `VK_L` | 19–27 |
-| Z 行 | `VK_Z` `VK_X` `VK_C` `VK_V` `VK_B` `VK_N` `VK_M` | 28–34 |
+| 数字 | `VK_1` `VK_2` `VK_3` `VK_4` | 0–3 |
+| Q 行 | `VK_Q` `VK_W` `VK_E` `VK_R` | 4–7 |
+| A 行 | `VK_A` `VK_S` `VK_D` `VK_F` | 8–11 |
+| Z 行 | `VK_Z` `VK_X` `VK_C` `VK_V` | 12–15 |
 
-共 35 个键位。超出后通过 `Tab` / `Shift+Tab` 翻页（每页 35 个）。
+共 16 个键位。**两级结构**下容量是 16 × 16 = 256 个窗口，不再需要翻页。
+槽位超过 16 个时第 16 格自动变成「更多…」组装下余量（见 5.6）。
 
-### 5.6 排序规则
-- 数据结构：见 3.2
-- 应用顺序：
-  1. 排除（命中 `IsExcluded=true` 的窗口丢弃）
-  2. 置顶（命中 `IsPinned=true` 的窗口移到列表前部，组内保持原序）
-  3. Priority 降序
-  4. 同 Priority 按 z-order 倒序
-- 匹配：
-  - `ProcessName`：`Path.GetFileName(processName)` 精确匹配（不区分大小写）
-  - `WindowTitle`：`title.Contains(pattern, IgnoreCase)`
-  - `Regex`：`Regex.Match(title).Success`
+> 缩到 16 键的副作用：`5-9 0 T Y U I O P G H J K L B N M` 不再被钩子吞掉。
+> 但索引键仍会抢走输入，所以搜索改成显式模式（`/` 进入、`Esc` 退出），
+> 进入搜索时通过 `SearchModeChanged` 通知 App 让钩子整体放行索引键。
+
+### 5.6 槽位布局：分组与排序
+
+顺序和分组由 `layout.json` 表达，**不再**编码进 `SortRule.Priority`。
+旧方案的坑：一个进程开多个窗口会写出多条同 Pattern、不同 Priority 的规则，
+而"取命中规则的最大值"会把该进程的每个窗口都抬到它占过的最高位置，顺序看起来就像没被记住。
+
+| 组件 | 职责 |
+|---|---|
+| `LayoutStore` | `layout.json` 读写 + 防抖热重载（自写入 1.5s 内不回灌） |
+| `LayoutResolver` | 枚举结果 + 布局 → 实际的 16 槽位树。纯函数 |
+| `SlotEditor` | 排序 / 并组 / 移出组。纯函数 |
+| `RuleEngine` | **退化为只管排除**，不再排序 |
+
+解析规则依次施加：
+1. 按 `layout.json` 的顺序安置已知进程的窗口
+2. 布局里没提到的进程按 z-order 追加在后面
+3. 同进程窗口数 ≥ `AutoGroupThreshold`（默认 2）自动折叠成组
+4. 组内成员按 z-order 排，**不做持久化**
+5. 只剩 1 个成员的组自动降级为窗口槽位
+6. 槽位超过 16 个时第 16 格变成「更多…」溢出组（`ToDocument` 时会被摊平，不固化）
+
+#### 窗口标识
+**身份只锚定在 `ProcessName` 上**，因为它是唯一跨会话稳定的线索：
+HWND 重启即变，窗口标题会随着换文件 / 换标签而变。窗口级的易变性全部交给运行时 z-order 吸收。
+代价：自动折叠出来的单进程组没法把"其中某一个窗口"单独拖出来，`SlotEditor.MoveOutOfGroup` 返回 `null`。
+
+#### 拖放语义（落点分区）
+每行垂直切三段，**落点位置决定语义**，不需要修饰键：
+
+| 落点 | 语义 | 反馈 |
+|---|---|---|
+| 上 25% | 插到本行之前 | 2px 插入线（两端带圆点） |
+| 中 50% | 并入本行成组 | 整行 2px 圆角描边 + 背景提亮 |
+| 下 25% | 插到本行之后 | 2px 插入线 |
+| 二级拖到面包屑 | 移出该组 | 面包屑高亮描边 |
+
+`Shift` 强制排序、`Ctrl` 强制分组，作为逃生通道。
+插入线放在 `IsHitTestVisible=False` 的 `Canvas` 上，避免干扰拖动命中测试。
+
+> ⚠️ **踩过的坑（导致拖动时闪退）**：`PART_DropLayer` 和 `PART_List` 是**兄弟**节点，
+> 而 `Visual.TransformToAncestor` 要求目标必须是**祖先**，否则抛 `InvalidOperationException`。
+> 拖动时每帧都会算插入线位置，所以一进到行的上/下 25% 区域就必崩
+> （中间 50% 走的是"并入"分支，不碰这个调用——这也是它看起来时灵时不灵的原因）。
+> 正确做法是转到二者的共同父级 `PART_ListHost`。
+> 另外全局补了 `DispatcherUnhandledException` 与钩子回调的 try/catch：
+> 常驻托盘程序最糟的失败方式是"悄悄消失"，UI 异常现在会记日志并继续运行。
+
+#### 重命名
+右键行 → 重命名。名字存在 `SlotDefinition.Name`，**只有用户改过的才落盘**——
+没改过的名字不存，因为窗口标题会变，存了反而会过期。
+清空输入框即恢复默认名（`ResolvedSlot.WithName(null)`）。
+`ResolvedSlot.CustomName` 与 `Name` 分开：`Name` 是显示用的，`CustomName` 是"用户改过"的标记。
+并组 / 排序 / 移出组都会带着 `CustomName` 走。
+
+### 5.7 图标提取
+
+原来只用 `WM_GETICON`，但很多程序根本不响应（UWP、部分 Electron/Java 程序、自绘标题栏的应用），
+那些窗口就显示不出图标。`IconExtractor` 改成四级兜底：
+
+| 级别 | 手段 | 适用 |
+|---|---|---|
+| 1 | `WM_GETICON`（BIG → SMALL → SMALL2） | 应用自己声明的，质量最好 |
+| 2 | `GetClassLongPtr(GCLP_HICON / GCLP_HICONSM)` | 注册窗口类时挂的图标 |
+| 3 | `ExtractIconEx` 扒 exe 图标资源 | 对不响应消息的程序最有效 |
+| 4 | `SHGetFileInfo` | 走 shell 解析，连无图标资源的程序也能拿到默认图标 |
+
+**句柄所有权**：第 1、2 级借来的是别人的（不能销毁），第 3、4 级是新建的（必须销毁）。
+为了不把这套规则泄漏给调用方，`GetWindowIcon` 一律 `CopyIcon` 复制后再返回，
+调用方只需 `IconExtractor.Release(hIcon)` 配对释放。
+
+实测：本机 32 个可见窗口全部取到图标，包括 `ApplicationFrameHost.exe`（UWP 宿主）
+和 `SystemSettings.exe` 这类典型的 `WM_GETICON` 失败案例。
 
 ### 5.7 持久化
 - 文件路径：`%APPDATA%\AltTabReplacer\rules.json`
@@ -342,14 +453,24 @@ Windows 限制：只有前台进程能把窗口设为前台。
 ### 6.1 选择器窗口
 | 属性 | 值 |
 |---|---|
-| 尺寸 | 自适应（列数 × (256+8) + 16，最大 10 列） |
-| 位置 | 主屏中央 |
+| 尺寸 | 主显示器工作区 × `Layout.WidthRatio` / `HeightRatio`（默认 0.5 / 0.55），下限 640×420 DIP |
+| 位置 | 主显示器正中 |
 | 背景 | `#202020` + Alpha 204（约 80% 不透明） |
 | 圆角 | 8px |
 | 阴影 | DWM DropShadow |
 | 置顶 | `Topmost = true` |
 | 任务栏图标 | `ShowInTaskbar = false` |
-| 启动位置 | `WindowStartupLocation = CenterScreen` |
+| 启动位置 | `WindowStartupLocation = Manual`，几何在 `SourceInitialized` / `Loaded` 里算 |
+
+尺寸不用 `CenterScreen` 也不写死像素，原因：
+
+- `CenterScreen` 在多显示器下居中到的不一定是**主**显示器
+- `Screen.WorkingArea` 是**物理像素**，而 WPF 的 `Left/Top/Width/Height` 是 **DIP**，
+  高 DPI 缩放下两者不等，必须用 `CompositionTarget.TransformFromDevice` 换算；
+  换算尺寸时用 `Vector` 而不是 `Point`，避免被矩阵的平移分量影响
+- `Loaded` 里会再算一次：`SourceInitialized` 时窗口还没挪到主显示器，
+  混合 DPI 下那一刻拿到的缩放可能属于别的屏
+- 左右分栏也改成按比例（`0.36*` / `0.64*`，左栏 `MinWidth=280`），否则窗口变大时侧栏会显得很窄
 
 ### 6.2 单元格模板
 ```
@@ -370,10 +491,10 @@ Windows 限制：只有前台进程能把窗口设为前台。
 | `123QWE…` 物理键 | 切换高亮（命中翻页则跳页） |
 | 鼠标移动 | 切换高亮 |
 | 鼠标左键点击 | 切到该窗口 + 隐藏选择器 |
-| `Esc` | 取消 + 隐藏选择器 |
-| `Tab` | 下一页（多于 35 个窗口时） |
-| `Shift+Tab` | 上一页 |
-| 释放 `Ctrl` / `Alt` 任一 | 切到当前高亮 + 隐藏 |
+| `Esc` / `Backspace` | 逐级回退：二级 → 一级 → 关闭 |
+
+| `Shift+Tab` / `↑` | 选中上一项 |
+| 再按 `Alt+Tab` | 关闭选择器（与 `Esc` 相同） |
 | 选择器外点击 | 取消 + 隐藏 |
 
 ---
@@ -387,8 +508,8 @@ Windows 限制：只有前台进程能把窗口设为前台。
 | `Layout.CellWidth` | `256` | 缩略图宽度（px） |
 | `Layout.CellHeight` | `144` | 缩略图高度（px） |
 | `Layout.CellPadding` | `8` | 单元格间距（px） |
-| `Layout.MaxColumns` | `10` | 每行最大列数 |
-| `Layout.MaxPerPage` | `35` | 翻页阈值 |
+| `Layout.MaxColumns` | `4` | 4×4 网格的列数 |
+| `Layout.AutoGroupThreshold` | `2` | 同进程几个窗口起自动折叠成组（99=关闭） |
 | `Theme.Accent` | `#FF0078D4` | 主题色 |
 | `Theme.Background` | `#CC202020` | 背景色 |
 | `Theme.CornerRadius` | `8` | 圆角（px） |
@@ -429,13 +550,10 @@ Windows 限制：只有前台进程能把窗口设为前台。
 - **D-03** 规则匹配维度
   - 候选 A：只匹配 `ProcessName`（简单，80% 场景够用）
   - 候选 B：ProcessName + WindowTitle + Regex 三种（推荐 P2 一次性做完）
-- **D-04** 超出 35 个键位的处理
-  - 候选 A：分页（`Tab` 翻页，推荐）
-  - 候选 B：缩放（缩略图自动缩小）
-  - 候选 C：截断（多的不显示）
-- **D-05** P1 是否需要方向键 + Enter 全键盘导航
-  - 候选 A：否，123QWE + 鼠标足够（推荐，先做核心）
-  - 候选 B：是，完整可访问性
+- **D-04** ~~超出 35 个键位的处理~~ → **已定**：键位缩到 16（4×4），超出部分由第 16 格的
+  「更多…」溢出组承载，不再分页。见 5.5 / 5.6
+- **D-05** ~~P1 是否需要方向键 + Enter 全键盘导航~~ → **已定**：需要。
+  `↑↓` / `Tab` / `Shift+Tab` 移动，`Enter` 确认，`Esc` / `Backspace` 逐级回退
 - **D-06** 配置文件位置
   - 候选 A：`%APPDATA%\AltTabReplacer\`（推荐，标准）
   - 候选 B：项目目录下的 `.config/`（更便携）
@@ -494,7 +612,8 @@ AltTabReplacer/
 
 | API | 库 | 用途 |
 |---|---|---|
-| `RegisterHotKey` / `UnregisterHotKey` | user32 | 全局热键 |
+| `RegisterHotKey` / `UnregisterHotKey` | user32 | 全局热键（非系统保留组合） |
+| `SetWindowsHookEx(WH_KEYBOARD_LL)` / `UnhookWindowsHookEx` | user32 | 接管 Alt+Tab、绕开 IME |
 | `EnumWindows` / `EnumWindowsProc` | user32 | 窗口枚举 |
 | `GetWindowText` / `GetWindowTextLength` | user32 | 标题 |
 | `GetWindowThreadProcessId` | user32 | PID |
@@ -506,6 +625,7 @@ AltTabReplacer/
 | `SetForegroundWindow` / `BringWindowToTop` | user32 | 切窗 |
 | `ShowWindow` | user32 | 最小化恢复 |
 | `AllowSetForegroundWindow` | user32 | 解锁前台限制 |
+| `AttachThreadInput` | user32 | 钩子路径下绕开前台锁 |
 | `GetWindowPlacement` | user32 | 最小化状态 |
 | `OpenProcess` / `CloseHandle` | kernel32 | 进程信息 |
 | `QueryFullProcessImageName` | kernel32 | 进程路径 |
