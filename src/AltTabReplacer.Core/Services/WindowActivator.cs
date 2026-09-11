@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using AltTabReplacer.Core.Infrastructure;
 using AltTabReplacer.Core.Models;
@@ -8,9 +9,56 @@ namespace AltTabReplacer.Core.Services;
 
 /// <summary>
 /// 把窗口激活到前台。处理"前台锁"问题（SetForegroundWindow 限制）。
+/// 程序组合还用它来"未开则启动"。
 /// </summary>
 public sealed class WindowActivator
 {
+    /// <summary>
+    /// 打开一个程序组合：按成员顺序，已开则激活、未开则用 exe 启动。
+    /// </summary>
+    public void OpenCombination(ResolvedSlot combo)
+    {
+        var refs = combo.Members;
+        if (refs is not { Count: > 0 }) return;
+
+        var matchedProcs = new System.Collections.Generic.HashSet<string>(
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var w in combo.Windows) matchedProcs.Add(w.ProcessName);
+
+        // 已开的先激活
+        foreach (var w in combo.Windows)
+        {
+            try { Activate(w); }
+            catch (Exception ex) { Logger.Error($"激活失败: {ex.Message}"); }
+        }
+
+        // 未开的启动
+        foreach (var spec in refs)
+        {
+            if (matchedProcs.Contains(spec.Process)) continue;
+            if (!string.IsNullOrEmpty(spec.ExePath)) Launch(spec.ExePath!);
+            else Logger.Warn($"程序组合成员 {spec.Process} 没有可执行路径，无法启动");
+        }
+    }
+
+    /// <summary>用 ShellExecute 启动一个可执行文件（走默认关联 / 工作目录）。</summary>
+    public static void Launch(string exePath)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = exePath,
+                UseShellExecute = true,
+            });
+            Logger.Info($"启动程序: {exePath}");
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"启动失败 {exePath}: {ex.Message}");
+        }
+    }
+
     public void Activate(WindowInfo target)
     {
         if (target.Hwnd == IntPtr.Zero) return;

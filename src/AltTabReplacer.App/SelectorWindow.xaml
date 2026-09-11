@@ -54,6 +54,16 @@
                 <!-- 左侧：面包屑 + 搜索框 + 槽位列表 -->
                 <DockPanel Grid.Column="0" Margin="0,0,8,0">
 
+                    <!-- 左上角：新建程序组 -->
+                    <Border DockPanel.Dock="Top" HorizontalAlignment="Left" Margin="0,0,0,8"
+                            Visibility="{Binding AddGroupVisibility}">
+                        <Button x:Name="PART_AddGroup" Content="+ 新建程序组"
+                                Style="{StaticResource MenuBtn}"
+                                Click="OnAddGroupClick"
+                                ToolTip="新建一个空程序组，再把程序/程序组合拖到它上面"
+                                Background="#FF2A2A2A" Padding="10,5"/>
+                    </Border>
+
                     <!-- 面包屑：只在二级/搜索时出现。也是"拖出该组"的落点 -->
                     <Border x:Name="PART_Breadcrumb" DockPanel.Dock="Top"
                             Visibility="{Binding BreadcrumbVisibility}"
@@ -99,7 +109,7 @@
                     <!-- 底部操作提示 -->
                     <TextBlock DockPanel.Dock="Bottom" Margin="2,8,0,0"
                                Foreground="#FF666666" FontSize="10"
-                               Text="1234/QWER/ASDF/ZXCV 选择 · Enter 确认 · / 搜索 · Esc 返回 · 拖到行中并组"/>
+                               Text="1234/QWER/ASDF/ZXCV 选择 · Enter 确认 · / 搜索 · Esc 返回 · 拖到行中=程序组合，拖到程序组行=加入"/>
 
                     <!-- 列表 + 拖放反馈层。
                          PART_DropLayer 与 PART_List 是兄弟，插入线定位必须转换到共同祖先 PART_ListHost，
@@ -146,23 +156,33 @@
                                                                 <ColumnDefinition Width="Auto"/>
                                                             </Grid.ColumnDefinitions>
 
-                                                            <!-- 组色带：组行独有的左侧竖条 -->
+                                                            <!-- 容器色带：程序组蓝色、程序组合绿色 -->
                                                             <Border Grid.Column="0" Width="3" CornerRadius="1.5"
-                                                                    Background="#FF0078D4"
-                                                                    Visibility="{Binding GroupVisibility}"
-                                                                    VerticalAlignment="Stretch" Margin="0,1"/>
+                                                                    Visibility="{Binding ContainerVisibility}"
+                                                                    VerticalAlignment="Stretch" Margin="0,1">
+                                                                <Border.Style>
+                                                                    <Style TargetType="Border">
+                                                                        <Setter Property="Background" Value="#FF0078D4"/>
+                                                                        <Style.Triggers>
+                                                                            <DataTrigger Binding="{Binding IsCombination}" Value="True">
+                                                                                <Setter Property="Background" Value="#FF4CC26A"/>
+                                                                            </DataTrigger>
+                                                                        </Style.Triggers>
+                                                                    </Style>
+                                                                </Border.Style>
+                                                            </Border>
 
-                                                            <!-- 窗口行：单个大图标 -->
+                                                            <!-- 程序行：单个大图标 -->
                                                             <Image Grid.Column="1" Width="20" Height="20"
                                                                    Source="{Binding Icon}"
                                                                    Visibility="{Binding WindowVisibility}"
                                                                    HorizontalAlignment="Center"
                                                                    VerticalAlignment="Center"/>
 
-                                                            <!-- 组行：2×2 图标网格 -->
+                                                            <!-- 程序组 / 程序组合：2×2 图标网格 -->
                                                             <ItemsControl Grid.Column="1"
                                                                           ItemsSource="{Binding Icons}"
-                                                                          Visibility="{Binding GroupVisibility}"
+                                                                          Visibility="{Binding ContainerVisibility}"
                                                                           Width="26" Height="26"
                                                                           HorizontalAlignment="Center"
                                                                           VerticalAlignment="Center">
@@ -186,16 +206,17 @@
                                                                        Margin="8,0,0,0"
                                                                        TextTrimming="CharacterEllipsis"/>
 
-                                                            <!-- 成员数徽标 + 下一级箭头 -->
+                                                            <!-- 成员数徽标（容器都有）+ 下一级箭头（只有程序组） -->
                                                             <StackPanel Grid.Column="3" Orientation="Horizontal"
-                                                                        VerticalAlignment="Center"
-                                                                        Visibility="{Binding GroupVisibility}">
+                                                                        VerticalAlignment="Center">
                                                                 <TextBlock Text="{Binding CountBadge}"
                                                                            Foreground="#FF9ACBF0" FontSize="10"
-                                                                           VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                                                           VerticalAlignment="Center" Margin="0,0,4,0"
+                                                                           Visibility="{Binding ContainerVisibility}"/>
                                                                 <TextBlock Text="›" Foreground="#FF9ACBF0"
                                                                            FontSize="15" FontWeight="Bold"
-                                                                           VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                                                           VerticalAlignment="Center" Margin="0,0,6,0"
+                                                                           Visibility="{Binding ArrowVisibility}"/>
                                                             </StackPanel>
 
                                                             <!-- 索引键标签 -->
@@ -281,8 +302,10 @@
                         Style="{StaticResource MenuBtn}" Click="OnMenuRenameClick"/>
                 <Button x:Name="PART_MenuClose" Content="关闭程序"
                         Style="{StaticResource MenuBtn}" Click="OnMenuCloseClick"/>
-                <Button x:Name="PART_MenuDissolve" Content="解散分组"
+                <Button x:Name="PART_MenuDissolve" Content="删除程序组"
                         Style="{StaticResource MenuBtn}" Click="OnMenuDissolveClick"/>
+                <Button x:Name="PART_MenuDissolveCombo" Content="解散程序组合"
+                        Style="{StaticResource MenuBtn}" Click="OnMenuDissolveComboClick"/>
                 <Button x:Name="PART_MenuRemove" Content="移出分组"
                         Style="{StaticResource MenuBtn}" Click="OnMenuRemoveClick"/>
             </StackPanel>

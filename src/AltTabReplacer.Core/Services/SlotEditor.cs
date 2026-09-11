@@ -6,13 +6,66 @@ using AltTabReplacer.Core.Models;
 namespace AltTabReplacer.Core.Services;
 
 /// <summary>
-/// 槽位的结构编辑：排序、并组、移出组。
+/// 槽位的结构编辑：排序、建程序组、建程序组合、移出。
 ///
-/// 全部是**纯函数**（输入槽位列表，返回新的槽位列表），不碰 UI 也不碰文件，
-/// 这样第 6 节那张"七种拖放组合"的语义表才能被测试覆盖。
+/// 全部是**纯函数**（输入槽位列表，返回新的槽位列表），不碰 UI 也不碰文件。
+/// 需要可执行文件路径的地方通过 <c>exePath</c> 委托注入（程序组合"未开则启动"要用）。
 /// </summary>
 public static class SlotEditor
 {
+    /// <summary>单个程序组合最多包含的程序数。超过不加入。</summary>
+    public const int MaxCombinationPrograms = 4;
+
+    /// <summary>移除一级第 index 个槽位（窗口关闭后刷新视图用，不落盘）。</summary>
+    public static List<ResolvedSlot> RemoveAt(IReadOnlyList<ResolvedSlot> slots, int index)
+    {
+        var list = slots.ToList();
+        if (index >= 0 && index < list.Count) list.RemoveAt(index);
+        return list;
+    }
+
+    /// <summary>
+    /// 从程序组里移除一个成员（窗口关闭后刷新视图用，不落盘）。
+    /// 自动折叠组窗口数掉到 1 时会降级成窗口槽位。
+    /// </summary>
+    public static List<ResolvedSlot>? RemoveMemberFromGroup(
+        IReadOnlyList<ResolvedSlot> slots, int groupIndex, int memberIndex)
+    {
+        if (groupIndex < 0 || groupIndex >= slots.Count) return null;
+        var group = slots[groupIndex];
+        if (group.Kind != SlotKind.Group) return null;
+
+        var list = slots.ToList();
+
+        if (group.Children != null)
+        {
+            var children = group.Children.ToList();
+            if (memberIndex < 0 || memberIndex >= children.Count) return null;
+            children.RemoveAt(memberIndex);
+            list[groupIndex] = BuildGroup(group, children);
+            return list;
+        }
+
+        // 自动折叠组：按窗口移除
+        if (memberIndex < 0 || memberIndex >= group.Windows.Count) return null;
+        var windows = group.Windows.ToList();
+        var members = group.Members?.ToList();
+        windows.RemoveAt(memberIndex);
+        members?.RemoveAt(memberIndex);
+
+        if (windows.Count == 0)
+        {
+            list.RemoveAt(groupIndex);
+            return list;
+        }
+
+        var procs = windows.Select(w => w.ProcessName)
+                           .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        list[groupIndex] = MakeSlot(group.Name, group.CustomName, windows, procs,
+            group.MemberOrder?.ToList(), members);
+        return list;
+    }
+
     /// <summary>把 from 位置的槽位移到 to 位置（纯排序）。</summary>
     public static List<ResolvedSlot> Reorder(IReadOnlyList<ResolvedSlot> slots, int from, int to)
     {
@@ -27,171 +80,185 @@ public static class SlotEditor
         return list;
     }
 
+    // ============================================================
+    //  一级：建程序组合 / 建程序组
+    // ============================================================
+
     /// <summary>
-    /// 把 source 槽位并入 target 槽位，结果一定是个组。
-    /// 覆盖"窗口→窗口（新建组）""窗口→组（加入）""组→组（合并）"三种情况。
+    /// 拖动重叠：把 source 并入 target，结果是一个**程序组合**。
+    /// 只允许程序 / 程序组合参与；程序组不能进组合（不嵌套）。
+    /// 去重后超过 <see cref="MaxCombinationPrograms"/> 个则返回 null（不加入）。
     /// </summary>
-    public static List<ResolvedSlot> Merge(IReadOnlyList<ResolvedSlot> slots, int source, int target)
+    public static List<ResolvedSlot>? CreateCombination(
+        IReadOnlyList<ResolvedSlot> slots, int source, int target,
+        Func<WindowInfo, string?> exePath)
     {
+        if (source < 0 || source >= slots.Count) return null;
+        if (target < 0 || target >= slots.Count) return null;
+        if (source == target) return null;
+
+        var src = slots[source];
+        var dst = slots[target];
+        if (src.Kind == SlotKind.Group || dst.Kind == SlotKind.Group) return null;
+
+        var refs = MergeRefs(ProgramRefs(dst, exePath), ProgramRefs(src, exePath));
+        if (refs.Count > MaxCombinationPrograms) return null;
+
         var list = slots.ToList();
-        if (source < 0 || source >= list.Count) return list;
-        if (target < 0 || target >= list.Count) return list;
-        if (source == target) return list;
-
-        var src = list[source];
-        var dst = list[target];
-
-        var mergedProcs = dst.Processes.Concat(src.Processes)
-                             .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        var mergedWindows = dst.Windows.Concat(src.Windows).ToList();
-
-        // 目标的名字优先保留：本来是组就沿用组名，用户改过名就沿用改过的名
-        string? keep = dst.CustomName ?? (dst.Kind == SlotKind.Group ? dst.Name : null);
-
         list[target] = new ResolvedSlot
         {
-            Kind = SlotKind.Group,
-            Name = keep ?? LayoutResolver.AutoName(mergedWindows),
+            Kind = SlotKind.Combination,
+            Name = string.IsNullOrWhiteSpace(dst.CustomName) ? LayoutResolver.AutoNameForCombination(refs) : dst.CustomName!,
             CustomName = dst.CustomName,
-            Windows = mergedWindows,
-            Processes = mergedProcs,
-            // 关键：记下**具体是哪些窗口**，而不是"这些进程的全部窗口"。
-            // 否则把一个 VS Code 窗口拖进分组会把其余 VS Code 窗口一起拽进来。
-            // 同时带上各方已有的自定义显示名，别在合并时丢掉。
-            Members = MergeMemberSpecs(dst, src),
+            Windows = dst.Windows.Concat(src.Windows).ToList(),
+            Processes = refs.Select(r => r.Process).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+            Members = refs,
         };
         list.RemoveAt(source);
         return list;
     }
 
-    /// <summary>合并两个槽位的成员描述，保留各自已有的自定义显示名。顺序与 Windows 拼接顺序一致。</summary>
-    private static List<MemberSpec> MergeMemberSpecs(ResolvedSlot dst, ResolvedSlot src)
-    {
-        var specs = new List<MemberSpec>(dst.Windows.Count + src.Windows.Count);
-        foreach (var s in new[] { dst, src })
-        {
-            for (int i = 0; i < s.Windows.Count; i++)
-            {
-                var w = s.Windows[i];
-                string? display = s.Members is { Count: > 0 } && i < s.Members.Count
-                    ? s.Members[i].DisplayName
-                    : (s.Kind == SlotKind.Window ? s.CustomName : null);
-                specs.Add(new MemberSpec(w.ProcessName, w.Title) { DisplayName = display });
-            }
-        }
-        return specs;
-    }
-
-    /// <summary>
-    /// 把某个进程从组里拆出来，成为紧随其后的独立槽位。
-    ///
-    /// 组只剩一个进程时返回 null —— 身份锚定在进程上，
-    /// 自动折叠出来的单进程组没法再拆出"其中一个窗口"。调用方据此给提示。
-    /// </summary>
-    public static List<ResolvedSlot>? MoveOutOfGroup(
-        IReadOnlyList<ResolvedSlot> slots, int groupIndex, string processName)
+    /// <summary>把 memberIndex 处的程序 / 程序组合加入 groupIndex 处的程序组。</summary>
+    public static List<ResolvedSlot>? AddToGroup(
+        IReadOnlyList<ResolvedSlot> slots, int groupIndex, int memberIndex)
     {
         if (groupIndex < 0 || groupIndex >= slots.Count) return null;
-        var group = slots[groupIndex];
-        if (group.Kind != SlotKind.Group) return null;
+        if (memberIndex < 0 || memberIndex >= slots.Count) return null;
+        if (groupIndex == memberIndex) return null;
 
-        var restProcs = group.Processes
-            .Where(p => !string.Equals(p, processName, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        if (restProcs.Count == 0) return null;          // 单进程组，拆不动
+        if (slots[groupIndex].Kind != SlotKind.Group) return null;
+        if (slots[memberIndex].Kind == SlotKind.Group) return null;   // 程序组不能嵌套
 
-        bool IsMoved(WindowInfo w) =>
-            string.Equals(w.ProcessName, processName, StringComparison.OrdinalIgnoreCase);
-
-        var movedWindows = group.Windows.Where(IsMoved).ToList();
-        var restWindows = group.Windows.Where(w => !IsMoved(w)).ToList();
-        if (movedWindows.Count == 0 || restWindows.Count == 0) return null;
-
+        var member = slots[memberIndex];
         var list = slots.ToList();
-        // 原组保留用户定过的顺序，但要剔除被移走的那个
-        var restOrder = group.MemberOrder?
-            .Where(t => !movedWindows.Any(m => string.Equals(m.Title, t, StringComparison.OrdinalIgnoreCase)))
-            .ToList();
-        list[groupIndex] = MakeSlot(group.Name, group.CustomName, restWindows, restProcs, restOrder);
-        list.Insert(groupIndex + 1, MakeSlot(null, null, movedWindows, new List<string> { processName }));
+        list.RemoveAt(memberIndex);
+        int gi = groupIndex > memberIndex ? groupIndex - 1 : groupIndex;
+
+        var g = list[gi];
+        var children = GroupChildren(g);
+        children.Add(member);
+        list[gi] = BuildGroup(g, children);
         return list;
     }
 
-    /// <summary>
-    /// 把**单个窗口**从组里拆出来，单独成为一个新槽位。
-    ///
-    /// 与 <see cref="MoveOutOfGroup"/> 的区别：后者按进程拆，对单进程组（自动折叠出来的）失效；
-    /// 本方法按窗口拆，单进程组里多窗口时也能逐一移出。
-    /// 组内只剩这个窗口被移走时返回 null —— 没有可拆的了。
-    /// </summary>
-    public static List<ResolvedSlot>? MoveWindowOutOfGroup(
-        IReadOnlyList<ResolvedSlot> slots, int groupIndex, WindowInfo window)
+    /// <summary>新建一个空程序组（界面左上角"+"）。</summary>
+    public static List<ResolvedSlot> CreateEmptyGroup(IReadOnlyList<ResolvedSlot> slots, string name = "新程序组")
     {
-        if (groupIndex < 0 || groupIndex >= slots.Count) return null;
-        var group = slots[groupIndex];
-        if (group.Kind != SlotKind.Group) return null;
-        if (group.Windows.Count <= 1) return null;       // 唯一成员，拆不动
-
-        // 找到这个窗口在组里的索引
-        int idx = -1;
-        for (int i = 0; i < group.Windows.Count; i++)
-        {
-            if (group.Windows[i].Hwnd == window.Hwnd) { idx = i; break; }
-        }
-        if (idx < 0) return null;
-
-        // 与 Windows 一一对应的成员描述（只有手工组才有）
-        var srcMembers = group.Members is { Count: > 0 } && group.Members.Count == group.Windows.Count
-            ? group.Members
-            : null;
-
-        var restWindows = new List<WindowInfo>(group.Windows.Count - 1);
-        for (int i = 0; i < group.Windows.Count; i++)
-            if (i != idx) restWindows.Add(group.Windows[i]);
-
-        // 剩余组的成员描述（剔除被移走的那个），保住各自的自定义显示名，
-        // 也避免剩余组退化成"按进程认领"从而又去抢别的组的窗口。
-        List<MemberSpec>? restMembers = null;
-        if (srcMembers != null)
-        {
-            restMembers = new List<MemberSpec>(srcMembers.Count - 1);
-            for (int i = 0; i < srcMembers.Count; i++)
-                if (i != idx) restMembers.Add(srcMembers[i]);
-        }
-
-        // 剩下的窗口还覆盖哪些进程
-        var restProcs = restWindows
-            .Select(w => w.ProcessName)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        // 剩下的组仍然按用户的拖动顺序排，但剔除被移走窗口的标题
-        var restOrder = group.MemberOrder?
-            .Where(t => !string.Equals(t, window.Title, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-
-        string? movedDisplay = srcMembers?[idx].DisplayName;
-
         var list = slots.ToList();
-        list[groupIndex] = MakeSlot(group.Name, group.CustomName, restWindows, restProcs, restOrder, restMembers);
-        // 被移出的窗口单独成槽，位置在原组之后；保留它自己的自定义显示名
-        list.Insert(groupIndex + 1, new ResolvedSlot
+        list.Add(new ResolvedSlot
         {
-            Kind = SlotKind.Window,
-            Name = string.IsNullOrWhiteSpace(movedDisplay) ? window.Title : movedDisplay!,
-            CustomName = movedDisplay,
-            Windows = new[] { window },
-            Processes = new[] { window.ProcessName },
-            Members = new[] { new MemberSpec(window.ProcessName, window.Title) { DisplayName = movedDisplay } },
+            Kind = SlotKind.Group,
+            Name = name,
+            CustomName = name,
+            Children = new List<ResolvedSlot>(),
+            Windows = Array.Empty<WindowInfo>(),
+            Processes = Array.Empty<string>(),
+            IsEmptyGroup = true,
         });
         return list;
     }
 
     /// <summary>
-    /// 组内成员重排序。**只允许排序，不允许再嵌套分组**（组的层级只有两级）。
-    ///
-    /// 重排后会写入 <see cref="ResolvedSlot.MemberOrder"/>（窗口标题列表）作为持久化提示。
-    /// 不写的话下次解析又会回到 z-order，用户的拖动就白做了。
+    /// 解散程序组合（一级）：把组合里的每个程序摊成独立的程序槽位，占据原位置。
+    /// </summary>
+    public static List<ResolvedSlot> DissolveCombination(IReadOnlyList<ResolvedSlot> slots, int index)
+    {
+        var list = slots.ToList();
+        if (index < 0 || index >= list.Count) return list;
+
+        var combo = list[index];
+        if (combo.Kind != SlotKind.Combination) return list;
+
+        list.RemoveAt(index);
+        list.InsertRange(index, ComboPieces(combo));
+        return list;
+    }
+
+    /// <summary>解散程序组合（二级）：把组合子项摊成组内独立的程序子项。</summary>
+    public static List<ResolvedSlot>? DissolveCombinationInGroup(
+        IReadOnlyList<ResolvedSlot> slots, int groupIndex, int childIndex)
+    {
+        if (groupIndex < 0 || groupIndex >= slots.Count) return null;
+        var group = slots[groupIndex];
+        if (group.Kind != SlotKind.Group) return null;
+        if (group.Children == null) return null;
+        if (childIndex < 0 || childIndex >= group.Children.Count) return null;
+
+        var combo = group.Children[childIndex];
+        if (combo.Kind != SlotKind.Combination) return null;
+
+        var children = group.Children.ToList();
+        children.RemoveAt(childIndex);
+        children.InsertRange(childIndex, ComboPieces(combo));
+
+        var list = slots.ToList();
+        list[groupIndex] = BuildGroup(group, children);
+        return list;
+    }
+
+    /// <summary>把程序组合展开成若干独立程序槽位（已开的窗口；带成员自定义显示名）。</summary>
+    private static List<ResolvedSlot> ComboPieces(ResolvedSlot combo)
+    {
+        var pieces = new List<ResolvedSlot>(combo.Windows.Count);
+        foreach (var w in combo.Windows)
+        {
+            string? display = null;
+            if (combo.Members is { Count: > 0 })
+            {
+                foreach (var m in combo.Members)
+                {
+                    if (string.Equals(m.Process, w.ProcessName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        display = m.DisplayName;
+                        break;
+                    }
+                }
+            }
+            pieces.Add(MakeWindowSlot(w, display, null));
+        }
+        return pieces;
+    }
+
+    /// <summary>
+    /// 删除程序组：只删容器，成员摊回一级。
+    /// 手工组摊开子项；自动折叠组摊开每个窗口（相当于旧的"解散分组"）。
+    /// </summary>
+    public static List<ResolvedSlot> DeleteGroup(IReadOnlyList<ResolvedSlot> slots, int groupIndex)
+    {
+        var list = slots.ToList();
+        if (groupIndex < 0 || groupIndex >= list.Count) return list;
+
+        var group = list[groupIndex];
+        if (group.Kind != SlotKind.Group) return list;
+
+        list.RemoveAt(groupIndex);
+
+        if (group.Children != null)
+        {
+            list.InsertRange(groupIndex, group.Children);
+        }
+        else
+        {
+            var pieces = new List<ResolvedSlot>(group.Windows.Count);
+            for (int i = 0; i < group.Windows.Count; i++)
+            {
+                var w = group.Windows[i];
+                string? display = group.Members is { Count: > 0 } && i < group.Members.Count
+                    ? group.Members[i].DisplayName
+                    : null;
+                pieces.Add(MakeWindowSlot(w, display, null));
+            }
+            list.InsertRange(groupIndex, pieces);
+        }
+        return list;
+    }
+
+    // ============================================================
+    //  二级：组内排序 / 组内并成组合 / 移出
+    // ============================================================
+
+    /// <summary>
+    /// 组内成员重排序。手工组重排子项；自动折叠组重排窗口（写 MemberOrder）。
     /// </summary>
     public static List<ResolvedSlot>? ReorderWithinGroup(
         IReadOnlyList<ResolvedSlot> slots, int groupIndex, int from, int to)
@@ -200,18 +267,32 @@ public static class SlotEditor
         var group = slots[groupIndex];
         if (group.Kind != SlotKind.Group) return null;
 
+        if (group.Children != null)
+        {
+            var children = group.Children.ToList();
+            if (from < 0 || from >= children.Count) return null;
+            int at = to;
+            var moving = children[from];
+            children.RemoveAt(from);
+            if (from < at) at--;
+            at = Math.Clamp(at, 0, children.Count);
+            children.Insert(at, moving);
+
+            var list = slots.ToList();
+            list[groupIndex] = BuildGroup(group, children);
+            return list;
+        }
+
+        // 自动折叠组：重排窗口 + 写 MemberOrder
         var windows = group.Windows.ToList();
         if (from < 0 || from >= windows.Count) return null;
-
         int insertAt = to;
-        var moving = windows[from];
+        var wmoving = windows[from];
         windows.RemoveAt(from);
-        if (from < insertAt) insertAt--;          // 移除自身后目标索引左移
+        if (from < insertAt) insertAt--;
         insertAt = Math.Clamp(insertAt, 0, windows.Count);
-        windows.Insert(insertAt, moving);
+        windows.Insert(insertAt, wmoving);
 
-        // 手工组（有 Members）要同步重排 Members，否则成员的自定义显示名会错位。
-        // 自动折叠组没有 Members，退回写 MemberOrder（窗口标题）作为顺序提示。
         List<MemberSpec>? members = null;
         if (group.Members is { Count: > 0 } && group.Members.Count == group.Windows.Count)
         {
@@ -222,8 +303,8 @@ public static class SlotEditor
             members = ml;
         }
 
-        var list = slots.ToList();
-        list[groupIndex] = new ResolvedSlot
+        var outList = slots.ToList();
+        outList[groupIndex] = new ResolvedSlot
         {
             Kind = group.Kind,
             Name = group.Name,
@@ -234,50 +315,223 @@ public static class SlotEditor
             Members = members,
             MemberOrder = members == null ? windows.Select(w => w.Title).ToList() : null,
         };
+        return outList;
+    }
+
+    /// <summary>组内拖动重叠：把两个子项并成一个程序组合子项。超过 4 个返回 null。</summary>
+    public static List<ResolvedSlot>? CombineWithinGroup(
+        IReadOnlyList<ResolvedSlot> slots, int groupIndex, int source, int target,
+        Func<WindowInfo, string?> exePath)
+    {
+        if (groupIndex < 0 || groupIndex >= slots.Count) return null;
+        var group = slots[groupIndex];
+        if (group.Kind != SlotKind.Group) return null;
+        if (source == target) return null;
+
+        var children = GroupChildren(group);
+        if (source < 0 || source >= children.Count) return null;
+        if (target < 0 || target >= children.Count) return null;
+
+        var src = children[source];
+        var dst = children[target];
+        if (src.Kind == SlotKind.Group || dst.Kind == SlotKind.Group) return null;
+
+        var refs = MergeRefs(ProgramRefs(dst, exePath), ProgramRefs(src, exePath));
+        if (refs.Count > MaxCombinationPrograms) return null;
+
+        children[target] = new ResolvedSlot
+        {
+            Kind = SlotKind.Combination,
+            Name = string.IsNullOrWhiteSpace(dst.CustomName) ? LayoutResolver.AutoNameForCombination(refs) : dst.CustomName!,
+            CustomName = dst.CustomName,
+            Windows = dst.Windows.Concat(src.Windows).ToList(),
+            Processes = refs.Select(r => r.Process).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+            Members = refs,
+        };
+        children.RemoveAt(source);
+
+        var list = slots.ToList();
+        list[groupIndex] = BuildGroup(group, children);
+        return list;
+    }
+
+    /// <summary>二级重命名：改手工程序组里第 childIndex 个子项（程序 / 程序组合）的显示名。</summary>
+    public static List<ResolvedSlot>? RenameChild(
+        IReadOnlyList<ResolvedSlot> slots, int groupIndex, int childIndex, string? name)
+    {
+        if (groupIndex < 0 || groupIndex >= slots.Count) return null;
+        var group = slots[groupIndex];
+        if (group.Kind != SlotKind.Group) return null;
+        if (group.Children == null) return null;
+        if (childIndex < 0 || childIndex >= group.Children.Count) return null;
+
+        var children = group.Children.ToList();
+        children[childIndex] = children[childIndex].WithName(name);
+
+        var list = slots.ToList();
+        list[groupIndex] = BuildGroup(group, children);
+        return list;
+    }
+
+    /// <summary>把组内第 childIndex 个子项移出到组后面（二级拖到面包屑）。手工组限定。</summary>
+    public static List<ResolvedSlot>? MoveChildOutOfGroup(
+        IReadOnlyList<ResolvedSlot> slots, int groupIndex, int childIndex)
+    {
+        if (groupIndex < 0 || groupIndex >= slots.Count) return null;
+        var group = slots[groupIndex];
+        if (group.Kind != SlotKind.Group) return null;
+        if (group.Children == null) return null;                 // 自动组走 MoveWindowOutOfGroup
+        if (childIndex < 0 || childIndex >= group.Children.Count) return null;
+        if (group.Children.Count <= 1) return null;              // 只剩一个，拆不动
+
+        var children = group.Children.ToList();
+        var moved = children[childIndex];
+        children.RemoveAt(childIndex);
+
+        var list = slots.ToList();
+        list[groupIndex] = BuildGroup(group, children);
+        list.Insert(groupIndex + 1, moved);
         return list;
     }
 
     /// <summary>
-    /// 解散分组：拆成"每个窗口一个槽位"。
-    ///
-    /// 每个槽位记的是**具体那个窗口**（进程 + 标题），不是整个进程，
-    /// 所以不会在下次解析时又被折叠回去——这正是"解散分组点了没反应"的原因。
-    /// 跨进程组和单进程组用同一套机制，不再需要区分。
+    /// 把**单个窗口**从自动折叠组里拆出来（按窗口，不按进程）。
+    /// 手工组请用 <see cref="MoveChildOutOfGroup"/>。
     /// </summary>
-    public static List<ResolvedSlot> DissolveGroup(IReadOnlyList<ResolvedSlot> slots, int groupIndex)
+    public static List<ResolvedSlot>? MoveWindowOutOfGroup(
+        IReadOnlyList<ResolvedSlot> slots, int groupIndex, WindowInfo window)
     {
-        var list = slots.ToList();
-        if (groupIndex < 0 || groupIndex >= list.Count) return list;
+        if (groupIndex < 0 || groupIndex >= slots.Count) return null;
+        var group = slots[groupIndex];
+        if (group.Kind != SlotKind.Group) return null;
+        if (group.Windows.Count <= 1) return null;
 
-        var group = list[groupIndex];
-        if (group.Kind != SlotKind.Group) return list;
-
-        list.RemoveAt(groupIndex);
-
-        var pieces = new List<ResolvedSlot>(group.Windows.Count);
+        int idx = -1;
         for (int i = 0; i < group.Windows.Count; i++)
         {
-            var w = group.Windows[i];
-            // 保住成员在二级右键改过的显示名
-            string? display = group.Members is { Count: > 0 } && i < group.Members.Count
-                ? group.Members[i].DisplayName
-                : null;
-            pieces.Add(new ResolvedSlot
-            {
-                Kind = SlotKind.Window,
-                Name = string.IsNullOrWhiteSpace(display) ? w.Title : display!,
-                CustomName = display,
-                Windows = new[] { w },
-                Processes = new[] { w.ProcessName },
-                Members = new[] { new MemberSpec(w.ProcessName, w.Title) { DisplayName = display } },
-            });
+            if (group.Windows[i].Hwnd == window.Hwnd) { idx = i; break; }
+        }
+        if (idx < 0) return null;
+
+        var srcMembers = group.Members is { Count: > 0 } && group.Members.Count == group.Windows.Count
+            ? group.Members
+            : null;
+
+        var restWindows = new List<WindowInfo>(group.Windows.Count - 1);
+        for (int i = 0; i < group.Windows.Count; i++)
+            if (i != idx) restWindows.Add(group.Windows[i]);
+
+        List<MemberSpec>? restMembers = null;
+        if (srcMembers != null)
+        {
+            restMembers = new List<MemberSpec>(srcMembers.Count - 1);
+            for (int i = 0; i < srcMembers.Count; i++)
+                if (i != idx) restMembers.Add(srcMembers[i]);
         }
 
-        list.InsertRange(groupIndex, pieces);
+        var restProcs = restWindows.Select(w => w.ProcessName)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var restOrder = group.MemberOrder?
+            .Where(t => !string.Equals(t, window.Title, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        string? movedDisplay = srcMembers?[idx].DisplayName;
+
+        var list = slots.ToList();
+        list[groupIndex] = MakeSlot(group.Name, group.CustomName, restWindows, restProcs, restOrder, restMembers);
+        list.Insert(groupIndex + 1, MakeWindowSlot(window, movedDisplay, null));
         return list;
     }
 
-    /// <summary>剩 1 个窗口就降级成窗口槽位，保持"单成员组自动解散"的不变量。</summary>
+    // ============================================================
+    //  内部辅助
+    // ============================================================
+
+    /// <summary>取程序组的子项；自动折叠组现场物化成"每窗口一个程序子项"。</summary>
+    private static List<ResolvedSlot> GroupChildren(ResolvedSlot group)
+    {
+        if (group.Children != null) return group.Children.ToList();
+
+        var children = new List<ResolvedSlot>(group.Windows.Count);
+        for (int i = 0; i < group.Windows.Count; i++)
+        {
+            var w = group.Windows[i];
+            string? display = group.Members is { Count: > 0 } && i < group.Members.Count
+                ? group.Members[i].DisplayName
+                : null;
+            children.Add(MakeWindowSlot(w, display, null));
+        }
+        return children;
+    }
+
+    /// <summary>用新的子项列表重建程序组（展平窗口 / 进程）。</summary>
+    private static ResolvedSlot BuildGroup(ResolvedSlot g, List<ResolvedSlot> children)
+    {
+        return new ResolvedSlot
+        {
+            Kind = SlotKind.Group,
+            Name = g.Name,
+            CustomName = g.CustomName,
+            Children = children,
+            Windows = children.SelectMany(c => c.Windows).ToList(),
+            Processes = children.SelectMany(c => c.Processes)
+                                .Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+            IsEmptyGroup = children.Count == 0,
+        };
+    }
+
+    /// <summary>把一个槽位展开成"程序引用"列表（程序组合的成员）。</summary>
+    private static List<MemberSpec> ProgramRefs(ResolvedSlot slot, Func<WindowInfo, string?> exePath)
+    {
+        if (slot.Kind == SlotKind.Combination && slot.Members is { Count: > 0 })
+            return slot.Members.ToList();
+
+        var result = new List<MemberSpec>(slot.Windows.Count);
+        for (int i = 0; i < slot.Windows.Count; i++)
+        {
+            var w = slot.Windows[i];
+            string? display = slot.Members is { Count: > 0 } && i < slot.Members.Count
+                ? slot.Members[i].DisplayName : null;
+            string? exe = slot.Members is { Count: > 0 } && i < slot.Members.Count
+                ? slot.Members[i].ExePath : null;
+            result.Add(new MemberSpec(w.ProcessName, w.Title)
+            {
+                DisplayName = display,
+                ExePath = exe ?? exePath(w),
+            });
+        }
+        return result;
+    }
+
+    /// <summary>合并两组程序引用，按进程去重（同一个程序只留一个）。</summary>
+    private static List<MemberSpec> MergeRefs(IEnumerable<MemberSpec> a, IEnumerable<MemberSpec> b)
+    {
+        var result = new List<MemberSpec>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in a.Concat(b))
+        {
+            if (string.IsNullOrEmpty(s.Process)) continue;
+            if (seen.Add(s.Process)) result.Add(s);
+        }
+        return result;
+    }
+
+    private static ResolvedSlot MakeWindowSlot(WindowInfo w, string? display, string? customName)
+    {
+        string? effectiveCustom = !string.IsNullOrWhiteSpace(display) ? display : customName;
+        return new ResolvedSlot
+        {
+            Kind = SlotKind.Window,
+            Name = !string.IsNullOrWhiteSpace(display) ? display!
+                : !string.IsNullOrWhiteSpace(customName) ? customName!
+                : w.Title,
+            CustomName = effectiveCustom,
+            Windows = new[] { w },
+            Processes = new[] { w.ProcessName },
+            Members = new[] { new MemberSpec(w.ProcessName, w.Title) { DisplayName = display } },
+        };
+    }
+
+    /// <summary>剩 1 个窗口就降级成窗口槽位，保持"单成员自动组自动解散"的不变量。</summary>
     private static ResolvedSlot MakeSlot(string? name, string? customName,
         List<WindowInfo> windows, List<string> procs,
         IReadOnlyList<string>? memberOrder = null,
@@ -287,20 +541,8 @@ public static class SlotEditor
 
         if (!isGroup)
         {
-            // 单窗口：成员自定义显示名 > 槽位自定义名 > 窗口标题
             string? display = members is { Count: > 0 } ? members[0].DisplayName : null;
-            string finalName = !string.IsNullOrWhiteSpace(display) ? display!
-                : !string.IsNullOrWhiteSpace(customName) ? customName!
-                : windows[0].Title;
-            return new ResolvedSlot
-            {
-                Kind = SlotKind.Window,
-                Name = finalName,
-                CustomName = !string.IsNullOrWhiteSpace(display) ? display : customName,
-                Windows = windows,
-                Processes = procs,
-                Members = new[] { new MemberSpec(windows[0].ProcessName, windows[0].Title) { DisplayName = display } },
-            };
+            return MakeWindowSlot(windows[0], display, customName);
         }
 
         return new ResolvedSlot
@@ -310,7 +552,6 @@ public static class SlotEditor
             CustomName = customName,
             Windows = windows,
             Processes = procs,
-            // 有成员描述时顺序由 Members 决定，不再写 MemberOrder
             MemberOrder = members is { Count: > 0 } ? null : memberOrder,
             Members = members,
         };

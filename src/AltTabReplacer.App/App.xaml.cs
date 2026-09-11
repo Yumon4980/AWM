@@ -282,7 +282,7 @@ public partial class App : System.Windows.Application
 
         _trayIcon = new WinForms.NotifyIcon
         {
-            Icon = System.Drawing.SystemIcons.Application,
+            Icon = LoadAppIcon(),
             Text = $"AltTabReplacer — {HotkeyLabel} 唤起",
             Visible = true,
             ContextMenuStrip = menu,
@@ -301,6 +301,25 @@ public partial class App : System.Windows.Application
                 LaunchConfigInNewProcess();
             }
         }
+    }
+
+    /// <summary>取 exe 上嵌入的图标当托盘图标；失败退回系统默认图标。</summary>
+    private static System.Drawing.Icon LoadAppIcon()
+    {
+        try
+        {
+            var path = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(path))
+            {
+                var ico = System.Drawing.Icon.ExtractAssociatedIcon(path);
+                if (ico != null) return ico;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"加载程序图标失败: {ex.Message}");
+        }
+        return System.Drawing.SystemIcons.Application;
     }
 
     /// <summary>清空 layout.json，回到"全部按 z-order + 自动折叠"的初始状态。</summary>

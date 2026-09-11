@@ -45,6 +45,11 @@ public partial class SelectorWindow : Window
 
     private readonly Dictionary<IntPtr, BitmapSource?> _iconCache = new();
 
+    /// <summary>建程序组合时反查程序的可执行路径（"未开则启动"要用）。</summary>
+    private readonly ProcessPathResolver _pathResolver = new();
+
+    private string? ResolveExePath(WindowInfo w) => _pathResolver.GetPath(w.ProcessId);
+
     // ---- 拖动状态 ----
     private DateTime _mouseDownTime;
     private System.Windows.Point _mouseDownPos;
@@ -191,33 +196,47 @@ public partial class SelectorWindow : Window
     private SlotViewModel MakeRow(ResolvedSlot slot, string label)
     {
         BitmapSource? icon = slot.Count > 0 ? IconFor(slot.Windows[0]) : null;
-        var icons = slot.Kind == SlotKind.Group
+        var icons = (slot.Kind == SlotKind.Group || slot.Kind == SlotKind.Combination)
             ? slot.Windows.Take(4).Select(IconFor).ToList()
             : new List<BitmapSource?>();
         return new SlotViewModel(slot, label, icon, icons);
     }
 
-    /// <summary>把组内成员展开成二级的行（每个成员一个窗口行）。</summary>
+    /// <summary>
+    /// 把程序组展开成二级的行：
+    ///   手工组（Children 非 null）→ 每个子项一行（程序 / 程序组合）；
+    ///   自动折叠组 / 溢出组 → 每个窗口一行。
+    /// </summary>
     private void BuildGroupRows(ResolvedSlot group)
     {
         _vm.Slots.Clear();
-        for (int i = 0; i < group.Windows.Count && i < KeyMap.Size; i++)
+
+        if (group.Children != null)
         {
-            var w = group.Windows[i];
-            // 成员自定义名优先（用户二级右键"重命名程序"改过的），否则用窗口标题。
-            // 手工组的 Members 顺序与 Windows 一一对应；自动组没有 Members，直接用标题。
-            string? custom = group.Members is { Count: > 0 } && i < group.Members.Count
-                ? group.Members[i].DisplayName
-                : null;
-            var leaf = new ResolvedSlot
-            {
-                Kind = SlotKind.Window,
-                Name = string.IsNullOrWhiteSpace(custom) ? w.Title : custom!,
-                Windows = new[] { w },
-                Processes = new[] { w.ProcessName },
-            };
-            _vm.Slots.Add(MakeRow(leaf, KeyMap.LabelOf(i)));
+            for (int i = 0; i < group.Children.Count && i < KeyMap.Size; i++)
+                _vm.Slots.Add(MakeRow(group.Children[i], KeyMap.LabelOf(i)));
         }
+        else
+        {
+            for (int i = 0; i < group.Windows.Count && i < KeyMap.Size; i++)
+            {
+                var w = group.Windows[i];
+                // 成员自定义名优先（用户二级右键"重命名程序"改过的），否则用窗口标题。
+                string? custom = group.Members is { Count: > 0 } && i < group.Members.Count
+                    ? group.Members[i].DisplayName
+                    : null;
+                var leaf = new ResolvedSlot
+                {
+                    Kind = SlotKind.Window,
+                    Name = string.IsNullOrWhiteSpace(custom) ? w.Title : custom!,
+                    Windows = new[] { w },
+                    Processes = new[] { w.ProcessName },
+                    Members = new[] { new MemberSpec(w.ProcessName, w.Title) { DisplayName = custom } },
+                };
+                _vm.Slots.Add(MakeRow(leaf, KeyMap.LabelOf(i)));
+            }
+        }
+
         _vm.SelectedSlot = _vm.Slots.FirstOrDefault();
         UpdatePreview();
     }
@@ -404,8 +423,8 @@ public partial class SelectorWindow : Window
     /// <summary>
     /// 索引键分派。由全局低层键盘钩子调用（已投回 WPF 线程），也作为 OnKeyDown 的兜底。
     ///
-    /// 一级：命中窗口 → 直接切；命中组 → 进入二级
-    /// 二级：命中成员 → 直接切；没有映射 → 忽略
+    /// 一级：程序组 → 进入二级；程序组合 → 打开全部成员；程序 → 直接切
+    /// 二级：程序组合 → 打开全部成员；程序 → 直接切
     /// </summary>
     public void HandleVk(int vk)
     {
@@ -416,13 +435,22 @@ public partial class SelectorWindow : Window
         if (index >= rows.Count) return;        // 没有映射的键：忽略，不做任何事
 
         var row = rows[index];
+        ActivateRow(row, index);
+    }
 
+    /// <summary>确认某个行：程序组进二级，程序组合打开全部，程序切过去。</summary>
+    private void ActivateRow(SlotViewModel row, int index)
+    {
         if (_vm.Level == SelectorLevel.Top && row.Slot.Kind == SlotKind.Group)
         {
             EnterGroup(index, row.Slot);
             return;
         }
-
+        if (row.Slot.Kind == SlotKind.Combination)
+        {
+            OpenCombinationAndClose(row.Slot);
+            return;
+        }
         ActivateAndClose(row.Slot);
     }
 
@@ -526,18 +554,12 @@ public partial class SelectorWindow : Window
     //  激活 / 关闭
     // ----------------------------------------------------------
 
-    /// <summary>确认当前选中项：组就进去，窗口就切过去。</summary>
+    /// <summary>确认当前选中项：程序组进去，程序组合打开全部，程序切过去。</summary>
     public void ConfirmAndClose()
     {
         var sel = _vm.SelectedSlot;
         if (sel == null) { Cancel(); return; }
-
-        if (_vm.Level == SelectorLevel.Top && sel.Slot.Kind == SlotKind.Group)
-        {
-            EnterGroup(_vm.Slots.IndexOf(sel), sel.Slot);
-            return;
-        }
-        ActivateAndClose(sel.Slot);
+        ActivateRow(sel, _vm.Slots.IndexOf(sel));
     }
 
     private void ActivateAndClose(ResolvedSlot slot)
@@ -550,6 +572,16 @@ public partial class SelectorWindow : Window
         _closing = true;
         try { _activator.Activate(target); }
         catch (Exception ex) { Logger.Error($"激活失败: {ex.Message}"); }
+        Close();
+    }
+
+    /// <summary>打开程序组合（已开激活、未开启动），然后关闭选择器。</summary>
+    private void OpenCombinationAndClose(ResolvedSlot combo)
+    {
+        if (_closing) return;
+        _closing = true;
+        try { _activator.OpenCombination(combo); }
+        catch (Exception ex) { Logger.Error($"打开程序组合失败: {ex.Message}"); }
         Close();
     }
 
@@ -661,16 +693,11 @@ public partial class SelectorWindow : Window
 
     /// <summary>
     /// 落点分区：每行垂直切三段，位置决定语义。
-    ///   一级：
-    ///     上 25% → 插到本行之前（排序）
-    ///     中 50% → 并入本行（分组）
-    ///     下 25% → 插到本行之后（排序）
-    ///   二级（组内）：
-    ///     上 50% → 插到本行之前（排序）
-    ///     下 50% → 插到本行之后（排序）
-    ///     面包屑 → 移出该组
-    /// Shift 强制排序、Ctrl 强制分组，作为高级用户的逃生通道。
-    /// 二级 Ctrl 不生效——层级严格保持两级，禁止再嵌套分组。
+    ///   上 25% → 插到本行之前（排序）
+    ///   中 50% → 并入本行：目标是程序组 → 加入组；目标是程序/程序组合 → 建/扩程序组合
+    ///   下 25% → 插到本行之后（排序）
+    ///   二级拖到面包屑 → 移出该组
+    /// Shift 强制排序、Ctrl 强制并入，作为高级用户的逃生通道。
     /// </summary>
     private DropTarget HitTestDrop(System.Drawing.Point screenPos)
     {
@@ -679,32 +706,9 @@ public partial class SelectorWindow : Window
         {
             return new DropTarget(-1, DropMode.OutOfGroup);
         }
-        // 二级（不在面包屑上）：只允许组内排序
-        if (_vm.Level == SelectorLevel.InGroup)
-        {
-            for (int i = 0; i < _vm.Slots.Count; i++)
-            {
-                if (PART_List.ItemContainerGenerator.ContainerFromIndex(i) is not ListBoxItem item) continue;
-                if (item.ActualHeight <= 0) continue;
-
-                var topLeft = item.PointToScreen(new System.Windows.Point(0, 0));
-                var bottomRight = item.PointToScreen(new System.Windows.Point(item.ActualWidth, item.ActualHeight));
-                if (screenPos.Y < topLeft.Y || screenPos.Y >= bottomRight.Y) continue;
-
-                double rel = (screenPos.Y - topLeft.Y) / (bottomRight.Y - topLeft.Y);
-                // 二级强制排序：上下各半，禁止再分组
-                return new DropTarget(i, rel < 0.5 ? DropMode.InsertBefore : DropMode.InsertAfter);
-            }
-
-            // 二级空白处：追加到末尾
-            if (_vm.Slots.Count > 0 && IsOverElement(PART_List, screenPos))
-                return new DropTarget(_vm.Slots.Count - 1, DropMode.InsertAfter);
-
-            return DropTarget.None;
-        }
 
         // 搜索模式：禁止拖动
-        if (_vm.Level != SelectorLevel.Top) return DropTarget.None;
+        if (_vm.Level == SelectorLevel.Search) return DropTarget.None;
 
         for (int i = 0; i < _vm.Slots.Count; i++)
         {
@@ -804,34 +808,51 @@ public partial class SelectorWindow : Window
         if (drop.Mode == DropMode.OutOfGroup)
         {
             if (_openGroup == null || _openGroupIndex < 0) return;
-            if (source >= _openGroup.Windows.Count) return;
 
-            var moved = _openGroup.Windows[source];
-            var result = SlotEditor.MoveWindowOutOfGroup(_topSlots, _openGroupIndex, moved);
-            if (result == null)
+            List<ResolvedSlot>? result;
+            if (_openGroup.Children != null)
             {
-                Logger.Info($"移出失败: {moved.Title} ({moved.ProcessName}) 是该组唯一窗口");
-                return;
+                result = SlotEditor.MoveChildOutOfGroup(_topSlots, _openGroupIndex, source);
+                if (result == null) { Logger.Info("移出失败：只剩一个成员"); return; }
+                Logger.Info("移出子项");
             }
-            Logger.Info($"移出组: {moved.Title} ({moved.ProcessName})");
-            // 留在二级：组还在，只是少了一个成员。selection 不动
+            else
+            {
+                if (source >= _openGroup.Windows.Count) return;
+                var moved = _openGroup.Windows[source];
+                result = SlotEditor.MoveWindowOutOfGroup(_topSlots, _openGroupIndex, moved);
+                if (result == null) { Logger.Info($"移出失败: {moved.Title} 是该组唯一窗口"); return; }
+                Logger.Info($"移出组: {moved.Title} ({moved.ProcessName})");
+            }
+            // 留在二级：组还在，只是少了一个成员
             CommitGroupReorder(result, _openGroupIndex, -1);
             return;
         }
 
-        // ---- 二级：组内排序（不退出组）----
+        // ---- 二级：组内排序 / 组内并成程序组合 ----
         if (_vm.Level == SelectorLevel.InGroup)
         {
             if (_openGroup == null || _openGroupIndex < 0) return;
-            // 二级里 _vm.Slots 是组内成员的扁平视图（上限 KeyMap.Size），
-            // 但 _openGroup.Windows 才是真实的全部成员。dragSource 来自 _vm.Slots，
-            // 所以这里用 _vm.Slots.Count 当上限；越界就忽略
             if (source < 0 || source >= _vm.Slots.Count) return;
-            if (_openGroup.Windows.Count <= 1) return;        // 1 个成员拖了也没意义
+            if (_vm.Slots.Count <= 1) return;
 
-            // drop.Index 已经是 _vm.Slots 内的索引（= 组内成员号）。InsertAfter 时 index+1。
+            if (drop.Mode == DropMode.IntoSlot)
+            {
+                if (drop.Index == source) return;
+                var combined = SlotEditor.CombineWithinGroup(
+                    _topSlots, _openGroupIndex, source, drop.Index, ResolveExePath);
+                if (combined == null)
+                {
+                    Logger.Info("程序组合最多 4 个程序，未加入");
+                    return;
+                }
+                Logger.Info($"组内并成程序组合: {source} → {drop.Index}");
+                CommitGroupReorder(combined, _openGroupIndex, Math.Min(drop.Index, _vm.Slots.Count - 1));
+                return;
+            }
+
             int memberTarget = drop.Mode == DropMode.InsertAfter ? drop.Index + 1 : drop.Index;
-            Logger.Info($"组内排序: {source} → {memberTarget} ({_openGroup.Windows[Math.Min(source, _openGroup.Windows.Count - 1)].Title})");
+            Logger.Info($"组内排序: {source} → {memberTarget}");
             var result = SlotEditor.ReorderWithinGroup(_topSlots, _openGroupIndex, source, memberTarget);
             if (result == null) return;
             CommitGroupReorder(result, _openGroupIndex, memberTarget);
@@ -844,14 +865,38 @@ public partial class SelectorWindow : Window
 
         if (drop.Mode == DropMode.IntoSlot)
         {
-            Logger.Info($"并入: {_topSlots[source].Name} → {_topSlots[drop.Index].Name}");
-            CommitLayout(SlotEditor.Merge(_topSlots, source, drop.Index));
+            var target = _topSlots[drop.Index];
+
+            // 目标是程序组 → 把 source 加进组
+            if (target.Kind == SlotKind.Group)
+            {
+                if (_topSlots[source].Kind == SlotKind.Group)
+                {
+                    Logger.Info("程序组不能嵌套，忽略");
+                    return;
+                }
+                var added = SlotEditor.AddToGroup(_topSlots, drop.Index, source);
+                if (added == null) { Logger.Info("无法加入程序组"); return; }
+                Logger.Info($"加入程序组: {_topSlots[source].Name} → {target.Name}");
+                CommitLayout(added, Math.Min(drop.Index, added.Count - 1));
+                return;
+            }
+
+            // 目标是程序 / 程序组合 → 建/扩程序组合
+            var combo = SlotEditor.CreateCombination(_topSlots, source, drop.Index, ResolveExePath);
+            if (combo == null)
+            {
+                Logger.Info("程序组合最多 4 个程序，未加入");
+                return;
+            }
+            Logger.Info($"程序组合: {_topSlots[source].Name} + {target.Name}");
+            CommitLayout(combo, Math.Min(drop.Index, combo.Count - 1));
             return;
         }
 
-        int target = drop.Mode == DropMode.InsertAfter ? drop.Index + 1 : drop.Index;
-        Logger.Info($"重排: {source} → {target} ({_topSlots[source].Name})");
-        CommitLayout(SlotEditor.Reorder(_topSlots, source, target));
+        int t = drop.Mode == DropMode.InsertAfter ? drop.Index + 1 : drop.Index;
+        Logger.Info($"重排: {source} → {t} ({_topSlots[source].Name})");
+        CommitLayout(SlotEditor.Reorder(_topSlots, source, t));
     }
 
     private void CommitLayout(IReadOnlyList<ResolvedSlot> slots, int selectIndex = -1)
@@ -918,24 +963,26 @@ public partial class SelectorWindow : Window
     private void ShowRowMenu(SlotViewModel row)
     {
         _menuRow = row;
-        // 一级：组行→重命名分组，窗口行→重命名程序；
-        // 二级：每一行都是一个程序（窗口），重命名的是它本身，不是整个组
-        PART_MenuRename.Content = _vm.Level == SelectorLevel.InGroup
-            ? "重命名程序"
-            : (row.Slot.Kind == SlotKind.Group ? "重命名分组" : "重命名程序");
-        PART_MenuClose.Visibility = Visibility.Visible;
-        // 解散只一级 + 必须是组
+        // 重命名：程序组 / 程序组合 / 程序各自的名字
+        PART_MenuRename.Content = row.Slot.Kind switch
+        {
+            SlotKind.Group => "重命名程序组",
+            SlotKind.Combination => "重命名程序组合",
+            _ => "重命名程序",
+        };
+        // 关闭程序只对单个程序有意义
+        PART_MenuClose.Visibility = row.Slot.Kind == SlotKind.Window
+            ? Visibility.Visible : Visibility.Collapsed;
+        // 删除程序组：只一级 + 必须是程序组
         PART_MenuDissolve.Visibility = (_vm.Level == SelectorLevel.Top && row.Slot.Kind == SlotKind.Group)
             ? Visibility.Visible : Visibility.Collapsed;
-        // 移出只二级；只要组里不止 1 个成员就能拆（按窗口拆，单进程组也支持）
-        if (_vm.Level == SelectorLevel.InGroup && _openGroup is { Windows.Count: > 1 })
-        {
-            PART_MenuRemove.Visibility = Visibility.Visible;
-        }
-        else
-        {
-            PART_MenuRemove.Visibility = Visibility.Collapsed;
-        }
+        // 解散程序组合：一级 / 二级都支持
+        PART_MenuDissolveCombo.Visibility = row.Slot.Kind == SlotKind.Combination
+            ? Visibility.Visible : Visibility.Collapsed;
+        // 移出只二级；只要组里不止 1 个成员就能拆（按窗口/子项拆）
+        bool canRemove = _openGroup != null && _vm.Level == SelectorLevel.InGroup
+            && (_openGroup.Children?.Count > 1 || (_openGroup.Children == null && _openGroup.Windows.Count > 1));
+        PART_MenuRemove.Visibility = canRemove ? Visibility.Visible : Visibility.Collapsed;
 
         var p = Mouse.GetPosition(PART_Grid);
         PART_Menu.Visibility = Visibility.Visible;
@@ -978,6 +1025,13 @@ public partial class SelectorWindow : Window
         if (row != null) DissolveGroup(row);
     }
 
+    private void OnMenuDissolveComboClick(object sender, RoutedEventArgs e)
+    {
+        var row = _menuRow;
+        HideRowMenu();
+        if (row != null) DissolveCombination(row);
+    }
+
     private void OnMenuRemoveClick(object sender, RoutedEventArgs e)
     {
         var row = _menuRow;
@@ -992,7 +1046,12 @@ public partial class SelectorWindow : Window
         if (idx < 0 || idx >= _topSlots.Count) return;
 
         var slot = _topSlots[idx];
-        string title = slot.Kind == SlotKind.Group ? "重命名分组" : "重命名程序";
+        string title = slot.Kind switch
+        {
+            SlotKind.Group => "重命名程序组",
+            SlotKind.Combination => "重命名程序组合",
+            _ => "重命名程序",
+        };
 
         string? result;
         _suppressAutoClose = true;
@@ -1023,16 +1082,16 @@ public partial class SelectorWindow : Window
     private void RenameMember(SlotViewModel memberRow)
     {
         if (_vm.Level != SelectorLevel.InGroup || _openGroup == null || _openGroupIndex < 0) return;
-        var w = memberRow.Slot.SingleWindow;
-        if (w == null) return;
 
         int memberIdx = _vm.Slots.IndexOf(memberRow);
-        if (memberIdx < 0 || memberIdx >= _openGroup.Windows.Count) return;
+        if (memberIdx < 0) return;
+
+        string title = memberRow.Slot.Kind == SlotKind.Combination ? "重命名程序组合" : "重命名程序";
 
         string? result;
         _suppressAutoClose = true;
         SuspendIndexCaptureChanged?.Invoke(true);
-        try { result = RenameDialog.Show(this, "重命名程序", memberRow.Slot.Name); }
+        try { result = RenameDialog.Show(this, title, memberRow.Slot.Name); }
         finally
         {
             SuspendIndexCaptureChanged?.Invoke(false);
@@ -1040,8 +1099,28 @@ public partial class SelectorWindow : Window
         }
         if (result == null) return;
 
-        // 以当前 Windows 顺序重建 Members：保留其它成员已有的自定义名，只改被点的这一行。
-        // 自动折叠组本来没有 Members，这一步会把它物化成手工组（顺序即当前显示顺序）。
+        // 手工程序组：改子项本身
+        if (_openGroup.Children != null)
+        {
+            var updated = SlotEditor.RenameChild(_topSlots, _openGroupIndex, memberIdx, result);
+            if (updated == null) return;
+            _topSlots = updated;
+            _openGroup = updated[_openGroupIndex];
+            BuildGroupRows(_openGroup);
+            if (memberIdx < _vm.Slots.Count)
+            {
+                _vm.SelectedSlot = _vm.Slots[memberIdx];
+                PART_List.ScrollIntoView(_vm.SelectedSlot);
+            }
+            LayoutChanged?.Invoke(_topSlots);
+            Activate();
+            Focus();
+            return;
+        }
+
+        // 自动折叠组：物化 Members，把显示名落到被点的那一行
+        if (memberIdx >= _openGroup.Windows.Count) return;
+
         var newMembers = new List<MemberSpec>(_openGroup.Windows.Count);
         for (int i = 0; i < _openGroup.Windows.Count; i++)
         {
@@ -1071,8 +1150,7 @@ public partial class SelectorWindow : Window
         _topSlots = slots;                                       // 关键：回写到字段，否则下次唤起还是旧名
         _openGroup = renamed;
         BuildGroupRows(renamed);
-        // 选回刚改名的那一行
-        if (memberIdx >= 0 && memberIdx < _vm.Slots.Count)
+        if (memberIdx < _vm.Slots.Count)
         {
             _vm.SelectedSlot = _vm.Slots[memberIdx];
             PART_List.ScrollIntoView(_vm.SelectedSlot);
@@ -1082,7 +1160,7 @@ public partial class SelectorWindow : Window
         Focus();
     }
 
-    /// <summary>解散分组：跨进程组按进程拆；单进程组拆成每窗口一个槽位并禁止再自动折叠。</summary>
+    /// <summary>删除程序组：只删容器，成员摊回一级。</summary>
     private void DissolveGroup(SlotViewModel row)
     {
         if (row.Slot.Kind != SlotKind.Group) return;
@@ -1090,15 +1168,61 @@ public partial class SelectorWindow : Window
         if (idx < 0 || idx >= _topSlots.Count) return;
 
         var before = _topSlots.Count;
-        var slots = SlotEditor.DissolveGroup(_topSlots, idx);
-        Logger.Info($"解散分组: {row.Name} → {before} 个槽位变 {slots.Count} 个");
+        var slots = SlotEditor.DeleteGroup(_topSlots, idx);
+        Logger.Info($"删除程序组: {row.Name} → {before} 个槽位变 {slots.Count} 个");
         CommitLayout(slots, idx);
+    }
+
+    /// <summary>解散程序组合：一级摊成顶级程序槽位；二级摊成组内程序子项。</summary>
+    private void DissolveCombination(SlotViewModel row)
+    {
+        if (row.Slot.Kind != SlotKind.Combination) return;
+        int idx = _vm.Slots.IndexOf(row);
+        if (idx < 0) return;
+
+        if (_vm.Level == SelectorLevel.InGroup)
+        {
+            if (_openGroup == null || _openGroupIndex < 0) return;
+            var result = SlotEditor.DissolveCombinationInGroup(_topSlots, _openGroupIndex, idx);
+            if (result == null) return;
+            Logger.Info($"解散程序组合(组内): {row.Name}");
+            CommitGroupReorder(result, _openGroupIndex, idx);
+            return;
+        }
+
+        var slots = SlotEditor.DissolveCombination(_topSlots, idx);
+        Logger.Info($"解散程序组合: {row.Name}");
+        CommitLayout(slots, idx);
+    }
+
+    /// <summary>左上角"+"：新建一个空程序组，之后把程序/程序组合拖到它上面即可加入。</summary>
+    private void OnAddGroupClick(object sender, RoutedEventArgs e)
+    {
+        if (_vm.Level != SelectorLevel.Top) return;
+
+        string? name;
+        _suppressAutoClose = true;
+        SuspendIndexCaptureChanged?.Invoke(true);
+        try { name = RenameDialog.Show(this, "新建程序组", "新程序组"); }
+        finally
+        {
+            SuspendIndexCaptureChanged?.Invoke(false);
+            _suppressAutoClose = false;
+        }
+        if (name == null) return;   // 取消
+
+        var slots = SlotEditor.CreateEmptyGroup(
+            _topSlots, string.IsNullOrWhiteSpace(name) ? "新程序组" : name);
+        Logger.Info($"新建程序组: {name}");
+        CommitLayout(slots, slots.Count - 1);
+        Activate();
+        Focus();
     }
 
     /// <summary>
     /// 关闭这个槽位代表的那个窗口（WM_CLOSE，目标程序自己处理）。
-    /// 关完后选择器也关闭——剩下的槽位在本次会话里已经过期了，留着只会误导。
-    /// 下次唤起时 layout 会按当前实际窗口重新解析，状态自然就对了。
+    /// **不关闭选择器**——用户可以继续在界面里操作、连续关掉多个程序。
+    /// 只把这一行从当前视图里去掉；下次唤起时 layout 会按当前实际窗口重新解析。
     /// </summary>
     private void CloseWindowFromSlot(SlotViewModel row)
     {
@@ -1110,30 +1234,77 @@ public partial class SelectorWindow : Window
         }
         Logger.Info($"关闭程序: {row.Name} (hwnd=0x{w.Hwnd:X})");
         PostMessage(w.Hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
-        Cancel();
+
+        RemoveRowFromView(row);
+        Activate();
+        Focus();
+    }
+
+    /// <summary>把一个槽位从当前视图里去掉（不改持久化布局）。</summary>
+    private void RemoveRowFromView(SlotViewModel row)
+    {
+        int idx = _vm.Slots.IndexOf(row);
+        if (idx < 0) return;
+
+        // 二级：从组里移除这个成员
+        if (_vm.Level == SelectorLevel.InGroup && _openGroup != null && _openGroupIndex >= 0)
+        {
+            var result = SlotEditor.RemoveMemberFromGroup(_topSlots, _openGroupIndex, idx);
+            if (result == null) return;
+            _topSlots = result;
+
+            if (_openGroupIndex >= _topSlots.Count) { GoBack(); return; }
+            var g = _topSlots[_openGroupIndex];
+            // 自动组降到单个窗口 → 回一级；组被清空也回一级，别停在空列表上
+            bool empty = g.Children != null ? g.Children.Count == 0 : g.Windows.Count == 0;
+            if (g.Kind != SlotKind.Group || empty) { GoBack(); return; }
+
+            _openGroup = g;
+            BuildGroupRows(g);
+            SelectClamped(idx);
+            return;
+        }
+
+        // 一级：直接移除
+        _topSlots = SlotEditor.RemoveAt(_topSlots, idx);
+        BuildRows(_topSlots);
+        SelectClamped(idx);
+    }
+
+    private void SelectClamped(int idx)
+    {
+        if (_vm.Slots.Count == 0) { UpdatePreview(); return; }
+        int i = Math.Min(Math.Max(0, idx), _vm.Slots.Count - 1);
+        _vm.SelectedSlot = _vm.Slots[i];
+        PART_List.ScrollIntoView(_vm.SelectedSlot);
+        UpdatePreview();
     }
 
     /// <summary>
     /// 二级"移出分组"：把这个成员单独拆出来成为一个新槽位，紧跟在该组之后。
-    /// 按窗口拆，单进程组（自动折叠出来的）只要多于一个窗口也能逐一移出。
+    /// 手工组移出子项；自动折叠组按窗口拆。
     /// </summary>
     private void RemoveFromGroup(SlotViewModel memberRow)
     {
         if (_vm.Level != SelectorLevel.InGroup || _openGroup == null || _openGroupIndex < 0) return;
-        var w = memberRow.Slot.SingleWindow;
-        if (w == null) return;
-
-        var result = SlotEditor.MoveWindowOutOfGroup(_topSlots, _openGroupIndex, w);
-        if (result == null)
-        {
-            Logger.Info($"移出分组失败: {w.Title} 是该组唯一成员");
-            return;
-        }
-
-        Logger.Info($"移出分组: {w.Title} ({w.ProcessName}) ← {_openGroup.Name}");
-        // 留在二级：组还在，只是少了一个成员。
-        // 选中的还是原行（移除后原 idx 处变成原 idx+1 的成员，相当于"自动选下一个"）
         int idx = _vm.Slots.IndexOf(memberRow);
+        if (idx < 0) return;
+
+        List<ResolvedSlot>? result;
+        if (_openGroup.Children != null)
+        {
+            result = SlotEditor.MoveChildOutOfGroup(_topSlots, _openGroupIndex, idx);
+            if (result == null) { Logger.Info("移出失败：只剩一个成员"); return; }
+            Logger.Info($"移出子项: {memberRow.Name} ← {_openGroup.Name}");
+        }
+        else
+        {
+            var w = memberRow.Slot.SingleWindow;
+            if (w == null) return;
+            result = SlotEditor.MoveWindowOutOfGroup(_topSlots, _openGroupIndex, w);
+            if (result == null) { Logger.Info($"移出分组失败: {w.Title} 是该组唯一成员"); return; }
+            Logger.Info($"移出分组: {w.Title} ({w.ProcessName}) ← {_openGroup.Name}");
+        }
         CommitGroupReorder(result, _openGroupIndex, idx);
     }
 
@@ -1167,43 +1338,12 @@ public partial class SelectorWindow : Window
         // 关键：Topmost 窗口正好压在光标底下时，光标消息会被它截走，
         // SelectorWindow 的 MouseMove 就停在那，drop feedback 卡死在源行上。
         // WS_EX_TRANSPARENT 让 Win32 直接把鼠标事件穿透到下层窗口。
-        // WS_EX_NOACTIVATE 防止它意外抢到前台激活权。
         // WPF 的 IsHitTestVisible 只管窗口**内部**命中测试，管不了 Win32 谁收消息。
         var ghostHwnd = new System.Windows.Interop.WindowInteropHelper(_ghostWindow).Handle;
-        if (ghostHwnd != IntPtr.Zero)
-        {
-            const int GWL_EXSTYLE = -20;
-            const long WS_EX_TRANSPARENT = 0x00000020L;
-            const long WS_EX_NOACTIVATE = 0x08000000L;
-            var ex = GetWindowLongPtr(ghostHwnd, GWL_EXSTYLE);
-            SetWindowLongPtr(ghostHwnd, GWL_EXSTYLE,
-                new IntPtr(ex.ToInt64() | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE));
-        }
+        WindowActivator.MakeClickThrough(ghostHwnd);
 
         StartDragFollowTimer();
     }
-
-    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
-    private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
-
-    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
-    private static extern int GetWindowLongPtr32(IntPtr hWnd, int nIndex);
-
-    private static IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex) =>
-        IntPtr.Size == 8
-            ? GetWindowLongPtr64(hWnd, nIndex)
-            : (IntPtr)GetWindowLongPtr32(hWnd, nIndex);
-
-    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
-    private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
-
-    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)]
-    private static extern int SetWindowLongPtr32(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
-
-    private static IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong) =>
-        IntPtr.Size == 8
-            ? SetWindowLongPtr64(hWnd, nIndex, dwNewLong)
-            : (IntPtr)SetWindowLongPtr32(hWnd, nIndex, dwNewLong.ToInt32());
 
     private void UpdateGhostFromOs()
     {
@@ -1285,7 +1425,7 @@ public partial class SelectorWindow : Window
 
         var title = new TextBlock
         {
-            Text = cell.IsGroup ? $"{cell.Name}  {cell.CountBadge}" : cell.Name,
+            Text = cell.IsContainer ? $"{cell.Name}  {cell.CountBadge}" : cell.Name,
             Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(221, 221, 221)),
             FontSize = 12,
             VerticalAlignment = System.Windows.VerticalAlignment.Center,

@@ -41,10 +41,15 @@ public sealed class SelectorViewModel : INotifyPropertyChanged
             Notify(nameof(BreadcrumbVisibility));
             Notify(nameof(IsSearching));
             Notify(nameof(SearchHintVisibility));
+            Notify(nameof(AddGroupVisibility));
         }
     }
 
     public bool IsSearching => _level == SelectorLevel.Search;
+
+    /// <summary>只有一级才显示"新建程序组"按钮（二级里建的是顶级组，容易迷惑）。</summary>
+    public Visibility AddGroupVisibility =>
+        _level == SelectorLevel.Top ? Visibility.Visible : Visibility.Collapsed;
 
     private string _breadcrumb = "";
     /// <summary>形如 "1 › 浏览器"。</summary>

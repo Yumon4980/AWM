@@ -12,6 +12,7 @@
     <RootNamespace>AltTabReplacer</RootNamespace>
     <AssemblyName>AltTabReplacer</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\AWM.ico</ApplicationIcon>
     <NoWarn>$(NoWarn);CS8002</NoWarn>
   </PropertyGroup>
 

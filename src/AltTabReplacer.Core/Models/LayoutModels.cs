@@ -6,11 +6,14 @@ namespace AltTabReplacer.Core.Models;
 /// <summary>槽位类型。</summary>
 public enum SlotKind
 {
-    /// <summary>叶子：一个具体窗口，按下直接切过去。</summary>
+    /// <summary>程序：一个具体窗口，按下直接切过去。</summary>
     Window = 0,
 
-    /// <summary>组：按下后进入二级，再选具体窗口。</summary>
+    /// <summary>程序组：按下进入二级，里面装程序 / 程序组合。</summary>
     Group = 1,
+
+    /// <summary>程序组合：按下同时/依次打开组内全部程序（已开则激活，未开则启动）。</summary>
+    Combination = 2,
 }
 
 /// <summary>
@@ -45,6 +48,12 @@ public sealed class MemberSpec
     /// 二级界面里"重命名程序"改的就是它，持久化后跟着 Members 走。
     /// </summary>
     public string? DisplayName { get; set; }
+
+    /// <summary>
+    /// 程序可执行文件路径。程序组合里用来"未开则启动"。
+    /// 从运行中的窗口进程反查得到；窗口关掉后这条记录还在，所以能再拉起来。
+    /// </summary>
+    public string? ExePath { get; set; }
 
     public MemberSpec() { }
     public MemberSpec(string process, string? title)
@@ -84,6 +93,13 @@ public sealed class SlotDefinition
     /// 这是"提示"而非硬绑定：标题变了就退回 z-order，不会因此丢窗口。
     /// </summary>
     public List<string>? MemberOrder { get; set; }
+
+    /// <summary>
+    /// 程序组的子项（程序 / 程序组合）。null = 自动折叠组（按 <see cref="Processes"/> 语义）。
+    /// 非 null（哪怕是空列表）= 手工创建的程序组，空组也要保留在界面上。
+    /// 层级严格两级：子项里不会再出现程序组。
+    /// </summary>
+    public List<SlotDefinition>? Children { get; set; }
 
     /// <summary>
     /// 旧字段：解散单进程组时置位。现已由 <see cref="Members"/> 取代，
