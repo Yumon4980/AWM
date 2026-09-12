@@ -400,12 +400,12 @@ public partial class App : System.Windows.Application
                 return;
             }
 
-            // 枚举结果 + 持久化布局 → 实际的 16 槽位树（含自动折叠、溢出组）
+            // 枚举结果 + 持久化布局 → 实际的槽位树（含自动折叠）。
+            // 一页放不下的槽位不再折成"更多…"，由选择器放进"未入网格"列表。
             var slots = LayoutResolver.Resolve(
                 windows,
                 _layoutStore!.Current,
-                _settings!.Layout.AutoGroupThreshold,
-                Core.KeyMap.Size);
+                _settings!.Layout.AutoGroupThreshold);
 
             // 不在这里抢前台。HostWindow 是 Visibility=Hidden 的 0x0 窗口，把它顶到前台
             // 既要 SW_SHOW 一个本该隐藏的窗口，又会把已打开的选择器挤失焦触发自动关闭。

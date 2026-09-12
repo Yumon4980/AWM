@@ -1,10 +1,8 @@
 using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Windows;
-using System.Windows.Data;
 
 namespace AltTabReplacer.ViewModels;
 
@@ -23,11 +21,15 @@ public enum SelectorLevel
 
 public sealed class SelectorViewModel : INotifyPropertyChanged
 {
-    /// <summary>当前层级要显示的行。</summary>
+    /// <summary>当前层级放进 4×4 网格的行（一级：前 16 个槽位；二级：组内成员）。</summary>
     public ObservableCollection<SlotViewModel> Slots { get; } = new();
 
-    /// <summary>搜索模式下用的过滤视图。</summary>
-    public ICollectionView FilteredSlots { get; }
+    /// <summary>放不进网格的槽位（一级超出 16 的部分），显示在网格左侧的纵向列表里。</summary>
+    public ObservableCollection<SlotViewModel> Overflow { get; } = new();
+
+    /// <summary>有溢出项时才显示左侧列表列。</summary>
+    public Visibility OverflowVisibility =>
+        Overflow.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
 
     private SelectorLevel _level = SelectorLevel.Top;
     public SelectorLevel Level
@@ -85,29 +87,12 @@ public sealed class SelectorViewModel : INotifyPropertyChanged
     public string SearchText
     {
         get => _searchText;
-        set
-        {
-            if (_searchText == value) return;
-            _searchText = value ?? "";
-            Notify();
-            FilteredSlots.Refresh();
-        }
+        set { if (_searchText == value) return; _searchText = value ?? ""; Notify(); }
     }
 
     public SelectorViewModel()
     {
-        FilteredSlots = CollectionViewSource.GetDefaultView(Slots);
-        FilteredSlots.Filter = FilterPredicate;
-    }
-
-    private bool FilterPredicate(object obj)
-    {
-        if (_level != SelectorLevel.Search || string.IsNullOrEmpty(_searchText)) return true;
-        if (obj is not SlotViewModel s) return false;
-        if (s.Name.Contains(_searchText, StringComparison.OrdinalIgnoreCase)) return true;
-        return s.Slot.Windows.Any(w =>
-            w.Title.Contains(_searchText, StringComparison.OrdinalIgnoreCase) ||
-            w.ProcessName.Contains(_searchText, StringComparison.OrdinalIgnoreCase));
+        Overflow.CollectionChanged += (_, __) => Notify(nameof(OverflowVisibility));
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

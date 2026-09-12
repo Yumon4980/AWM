@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -100,6 +101,22 @@ public sealed class SlotViewModel : INotifyPropertyChanged
             return w;
         }
         return null;
+    }
+
+    /// <summary>空占位格：只为撑满 4×4 网格、保留键位空间关系，不可选中 / 触发。</summary>
+    public bool IsEmpty { get; }
+
+    /// <summary>创建一个空占位格（只有键标）。</summary>
+    public static SlotViewModel Empty(string keyLabel) => new(keyLabel);
+
+    private SlotViewModel(string keyLabel)
+    {
+        Slot = new ResolvedSlot { Kind = SlotKind.Window };
+        Name = "";
+        _keyLabel = keyLabel;
+        Icon = null;
+        Icons = Array.Empty<BitmapSource?>();
+        IsEmpty = true;
     }
 
     public SlotViewModel(ResolvedSlot slot, string keyLabel, BitmapSource? icon, IReadOnlyList<BitmapSource?> icons)

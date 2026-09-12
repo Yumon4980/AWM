@@ -40,6 +40,12 @@ public partial class SelectorWindow : Window
     private ResolvedSlot? _openGroup;
     private int _openGroupIndex = -1;
 
+    /// <summary>网格里显示的槽位数 min(16, 当前层总数)；其余进左侧"未入网格"列表。</summary>
+    private int _gridCount;
+
+    /// <summary>选中同步的防重入标志：程序化改 SelectedItem 时不要再回调 Select。</summary>
+    private bool _syncingSelection;
+
     /// <summary>进入组之前一级的高亮项，Esc 回退时恢复。</summary>
     private int _savedTopSelection;
 
@@ -185,12 +191,21 @@ public partial class SelectorWindow : Window
     private void BuildRows(IReadOnlyList<ResolvedSlot> slots)
     {
         _vm.Slots.Clear();
-        for (int i = 0; i < slots.Count; i++)
-        {
+        _vm.Overflow.Clear();
+
+        // 前 16 个进 4×4 键位网格；放不下的进左侧"未入网格"列表。
+        _gridCount = Math.Min(KeyMap.Size, slots.Count);
+        for (int i = 0; i < _gridCount; i++)
             _vm.Slots.Add(MakeRow(slots[i], KeyMap.LabelOf(i)));
-        }
-        _vm.SelectedSlot = _vm.Slots.FirstOrDefault();
-        UpdatePreview();
+
+        // 始终 4×4：空位补不可触发的占位格，键位空间关系不随槽位数变化。
+        for (int i = _gridCount; i < KeyMap.Size; i++)
+            _vm.Slots.Add(SlotViewModel.Empty(KeyMap.LabelOf(i)));
+
+        for (int i = KeyMap.Size; i < slots.Count; i++)
+            _vm.Overflow.Add(MakeRow(slots[i], ""));
+
+        Select(_vm.Slots.FirstOrDefault(r => !r.IsEmpty) ?? _vm.Overflow.FirstOrDefault());
     }
 
     private SlotViewModel MakeRow(ResolvedSlot slot, string label)
@@ -210,6 +225,7 @@ public partial class SelectorWindow : Window
     private void BuildGroupRows(ResolvedSlot group)
     {
         _vm.Slots.Clear();
+        _vm.Overflow.Clear();
 
         if (group.Children != null)
         {
@@ -237,8 +253,10 @@ public partial class SelectorWindow : Window
             }
         }
 
-        _vm.SelectedSlot = _vm.Slots.FirstOrDefault();
-        UpdatePreview();
+        _gridCount = _vm.Slots.Count;
+        for (int i = _gridCount; i < KeyMap.Size; i++)
+            _vm.Slots.Add(SlotViewModel.Empty(KeyMap.LabelOf(i)));
+        Select(_vm.Slots.FirstOrDefault(r => !r.IsEmpty));
     }
 
     private BitmapSource? IconFor(WindowInfo w)
@@ -297,12 +315,80 @@ public partial class SelectorWindow : Window
         _vm.SearchText = PART_SearchBox.Text;
         PART_SearchHint.Visibility = string.IsNullOrEmpty(PART_SearchBox.Text)
             ? Visibility.Visible : Visibility.Collapsed;
-        if (_vm.FilteredSlots.Cast<object>().FirstOrDefault() is SlotViewModel first)
-            _vm.SelectedSlot = first;
+        if (_vm.Level == SelectorLevel.Search) ApplySearchFilter();
+    }
+
+    private void OnListSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_syncingSelection) return;
+        if (PART_List.SelectedItem is SlotViewModel s) Select(s);
+    }
+
+    private void OnOverflowSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_syncingSelection) return;
+        if (PART_Overflow.SelectedItem is SlotViewModel s) Select(s);
+    }
+
+    /// <summary>统一的选中入口：更新 SelectedSlot、两个列表的选中态与滚动，并刷新预览。</summary>
+    private void Select(SlotViewModel? slot)
+    {
+        if (slot != null && ReferenceEquals(slot, _vm.SelectedSlot)) { UpdatePreview(); return; }
+
+        _syncingSelection = true;
+        try
+        {
+            _vm.SelectedSlot = slot;
+            PART_List.SelectedItem = slot != null && _vm.Slots.Contains(slot) ? slot : null;
+            PART_Overflow.SelectedItem = slot != null && _vm.Overflow.Contains(slot) ? slot : null;
+            if (slot != null)
+            {
+                if (_vm.Slots.Contains(slot)) PART_List.ScrollIntoView(slot);
+                else if (_vm.Overflow.Contains(slot)) PART_Overflow.ScrollIntoView(slot);
+            }
+        }
+        finally { _syncingSelection = false; }
+
         UpdatePreview();
     }
 
-    private void OnListSelectionChanged(object sender, SelectionChangedEventArgs e) => UpdatePreview();
+    /// <summary>按"完整列表"索引选中（网格 0..15，溢出 16+）。空占位格会被忽略。</summary>
+    private void SelectByFullIndex(int fullIndex)
+    {
+        var row = CurrentRowAt(fullIndex);
+        if (row != null) Select(row);
+    }
+
+    /// <summary>取"完整列表"索引对应的行：网格用 0..15，溢出用 16+。空占位格返回 null。</summary>
+    private SlotViewModel? CurrentRowAt(int fullIndex)
+    {
+        if (fullIndex < 0) return null;
+        if (fullIndex < KeyMap.Size)
+        {
+            if (fullIndex >= _vm.Slots.Count) return null;
+            var r = _vm.Slots[fullIndex];
+            return r.IsEmpty ? null : r;
+        }
+        int oi = fullIndex - KeyMap.Size;
+        return oi < _vm.Overflow.Count ? _vm.Overflow[oi] : null;
+    }
+
+    /// <summary>行在"完整列表"里的索引（网格 0..15，溢出 16+）；找不到返回 -1。</summary>
+    private int CurrentIndexOf(SlotViewModel row)
+    {
+        int gi = _vm.Slots.IndexOf(row);
+        if (gi >= 0 && gi < _gridCount) return gi;
+        int oi = _vm.Overflow.IndexOf(row);
+        return oi >= 0 ? KeyMap.Size + oi : -1;
+    }
+
+    /// <summary>逻辑索引（网格与溢出连续 0..N-1）→ 完整列表索引。</summary>
+    private int LogicalToFull(int logical) =>
+        logical < _gridCount ? logical : KeyMap.Size + (logical - _gridCount);
+
+    /// <summary>完整列表索引 → 逻辑索引；-1 原样返回。</summary>
+    private int FullToLogical(int full) =>
+        full < 0 ? -1 : (full < _gridCount ? full : _gridCount + (full - KeyMap.Size));
 
     /// <summary>捕获当前选中项的代表窗口并显示在右侧预览区。</summary>
     private void UpdatePreview()
@@ -421,17 +507,27 @@ public partial class SelectorWindow : Window
 
             case Key.Down:
                 e.Handled = true;
-                MoveSelection(1);
+                MoveGrid(0, 1);
                 return;
 
             case Key.Up:
                 e.Handled = true;
-                MoveSelection(-1);
+                MoveGrid(0, -1);
+                return;
+
+            case Key.Left:
+                e.Handled = true;
+                MoveGrid(-1, 0);
+                return;
+
+            case Key.Right:
+                e.Handled = true;
+                MoveGrid(1, 0);
                 return;
 
             case Key.Tab:
                 e.Handled = true;
-                MoveSelection((Keyboard.Modifiers & ModifierKeys.Shift) != 0 ? -1 : 1);
+                MoveLinear((Keyboard.Modifiers & ModifierKeys.Shift) != 0 ? -1 : 1);
                 return;
 
             case Key.Oem2:                      // "/" 进入搜索模式
@@ -465,11 +561,11 @@ public partial class SelectorWindow : Window
         if (_vm.Level == SelectorLevel.Search) return;
         if (KeyMap.ToIndex(vk) is not int index) return;
 
-        var rows = _vm.FilteredSlots.Cast<SlotViewModel>().ToList();
+        var rows = _vm.Slots;                    // 只有 4×4 网格里的行有索引键
         if (index >= rows.Count) return;        // 没有映射的键：忽略，不做任何事
+        if (rows[index].IsEmpty) return;        // 空占位格不响应
 
-        var row = rows[index];
-        ActivateRow(row, index);
+        ActivateRow(rows[index], index);
     }
 
     /// <summary>确认某个行：程序组进二级，程序组合打开全部，程序切过去。</summary>
@@ -495,7 +591,9 @@ public partial class SelectorWindow : Window
         _openGroup = group;
         _openGroupIndex = index;
         _vm.Level = SelectorLevel.InGroup;
-        _vm.Breadcrumb = $"{KeyMap.LabelOf(index)} › {group.Name}";
+        _vm.Breadcrumb = index >= 0 && index < KeyMap.Size
+            ? $"{KeyMap.LabelOf(index)} › {group.Name}"
+            : group.Name;
         BuildGroupRows(group);
         Logger.Info($"进入组: {group.Name} ({group.Count} 个窗口)");
     }
@@ -519,11 +617,7 @@ public partial class SelectorWindow : Window
                 _vm.Level = SelectorLevel.Top;
                 _vm.Breadcrumb = "";
                 BuildRows(_topSlots);
-                if (_savedTopSelection >= 0 && _savedTopSelection < _vm.Slots.Count)
-                {
-                    _vm.SelectedSlot = _vm.Slots[_savedTopSelection];
-                    PART_List.ScrollIntoView(_vm.SelectedSlot);
-                }
+                SelectByFullIndex(_savedTopSelection);
                 return;
 
             default:
@@ -536,27 +630,49 @@ public partial class SelectorWindow : Window
     {
         _vm.Level = SelectorLevel.Search;
         _vm.Breadcrumb = "搜索";
-        // 扁平列出所有窗口，跨组搜索才有意义
-        _vm.Slots.Clear();
-        for (int i = 0; i < _rawWindows.Count; i++)
-        {
-            var w = _rawWindows[i];
-            var leaf = new ResolvedSlot
-            {
-                Kind = SlotKind.Window,
-                Name = w.Title,
-                Windows = new[] { w },
-                Processes = new[] { w.ProcessName },
-            };
-            _vm.Slots.Add(MakeRow(leaf, ""));
-        }
         _vm.SearchText = "";
         PART_SearchBox.Text = "";
-        _vm.SelectedSlot = _vm.Slots.FirstOrDefault();
+        ApplySearchFilter();
         SuspendIndexCaptureChanged?.Invoke(true);        // 让钩子放行索引键，否则打不进字
         Dispatcher.BeginInvoke(() => Keyboard.Focus(PART_SearchBox));
-        UpdatePreview();
     }
+
+    /// <summary>按当前搜索词重建网格 + 溢出列表（扁平列出所有窗口，跨组搜索才有意义）。</summary>
+    private void ApplySearchFilter()
+    {
+        _vm.Slots.Clear();
+        _vm.Overflow.Clear();
+
+        string text = _vm.SearchText;
+        var matches = new List<WindowInfo>();
+        foreach (var w in _rawWindows)
+        {
+            if (string.IsNullOrEmpty(text)
+                || w.Title.Contains(text, StringComparison.OrdinalIgnoreCase)
+                || w.ProcessName.Contains(text, StringComparison.OrdinalIgnoreCase))
+                matches.Add(w);
+        }
+
+        _gridCount = Math.Min(KeyMap.Size, matches.Count);
+        for (int i = 0; i < _gridCount; i++)
+            _vm.Slots.Add(MakeRow(SearchLeaf(matches[i]), KeyMap.LabelOf(i)));
+
+        for (int i = _gridCount; i < KeyMap.Size; i++)
+            _vm.Slots.Add(SlotViewModel.Empty(KeyMap.LabelOf(i)));
+
+        for (int i = KeyMap.Size; i < matches.Count; i++)
+            _vm.Overflow.Add(MakeRow(SearchLeaf(matches[i]), ""));
+
+        Select(_vm.Slots.FirstOrDefault(r => !r.IsEmpty) ?? _vm.Overflow.FirstOrDefault());
+    }
+
+    private static ResolvedSlot SearchLeaf(WindowInfo w) => new()
+    {
+        Kind = SlotKind.Window,
+        Name = w.Title,
+        Windows = new[] { w },
+        Processes = new[] { w.ProcessName },
+    };
 
     private void ExitSearch()
     {
@@ -569,19 +685,62 @@ public partial class SelectorWindow : Window
         Focus();
     }
 
-    /// <summary>在当前层级的行之间移动选中项，到头到尾循环。</summary>
-    private void MoveSelection(int delta)
+    /// <summary>Tab 用的线性移动：在"网格 + 溢出"整个列表里循环。</summary>
+    private void MoveLinear(int delta)
     {
-        var rows = _vm.FilteredSlots.Cast<SlotViewModel>().ToList();
-        if (rows.Count == 0) return;
+        int total = _gridCount + _vm.Overflow.Count;
+        if (total == 0) return;
 
-        int cur = _vm.SelectedSlot != null ? rows.IndexOf(_vm.SelectedSlot) : -1;
+        int cur = _vm.SelectedSlot != null ? FullToLogical(CurrentIndexOf(_vm.SelectedSlot)) : -1;
         int next = cur < 0
-            ? (delta > 0 ? 0 : rows.Count - 1)
-            : ((cur + delta) % rows.Count + rows.Count) % rows.Count;
+            ? (delta > 0 ? 0 : total - 1)
+            : ((cur + delta) % total + total) % total;
 
-        _vm.SelectedSlot = rows[next];
-        PART_List.ScrollIntoView(_vm.SelectedSlot);
+        SelectByFullIndex(LogicalToFull(next));
+    }
+
+    /// <summary>方向键：网格内按 2D 走（和物理键位一致），上下可进出左侧溢出列表。</summary>
+    private void MoveGrid(int dx, int dy)
+    {
+        int gridN = _gridCount;
+        int overflowN = _vm.Overflow.Count;
+        if (gridN + overflowN == 0) return;
+
+        int cur = _vm.SelectedSlot != null ? FullToLogical(CurrentIndexOf(_vm.SelectedSlot)) : -1;
+        if (cur < 0) { SelectByFullIndex(LogicalToFull(0)); return; }
+
+        if (cur < gridN)
+        {
+            int row = cur / KeyMap.Cols;
+            int col = cur % KeyMap.Cols;
+
+            if (dx != 0)
+            {
+                int nc = col + dx;
+                if (nc < 0 || nc >= KeyMap.Cols) return;
+                int ni = row * KeyMap.Cols + nc;
+                if (ni < gridN) SelectByFullIndex(LogicalToFull(ni));
+                return;
+            }
+
+            if (dy != 0)
+            {
+                int ni = (row + dy) * KeyMap.Cols + col;
+                if (ni >= 0 && ni < gridN) { SelectByFullIndex(LogicalToFull(ni)); return; }
+                if (dy > 0 && overflowN > 0) SelectByFullIndex(LogicalToFull(gridN));   // 往下进溢出列表
+                return;
+            }
+            return;
+        }
+
+        // 溢出列表内：上下移动，往上越界回到网格最后一条
+        int oi = cur - gridN;
+        if (dy != 0)
+        {
+            int noi = oi + dy;
+            if (noi >= 0 && noi < overflowN) { SelectByFullIndex(LogicalToFull(gridN + noi)); return; }
+            if (noi < 0 && gridN > 0) SelectByFullIndex(LogicalToFull(gridN - 1));
+        }
     }
 
     // ----------------------------------------------------------
@@ -593,7 +752,7 @@ public partial class SelectorWindow : Window
     {
         var sel = _vm.SelectedSlot;
         if (sel == null) { Cancel(); return; }
-        ActivateRow(sel, _vm.Slots.IndexOf(sel));
+        ActivateRow(sel, CurrentIndexOf(sel));
     }
 
     private void ActivateAndClose(ResolvedSlot slot)
@@ -660,6 +819,12 @@ public partial class SelectorWindow : Window
         {
             _dragSourceIndex = PART_List.ItemContainerGenerator.IndexFromContainer(item);
         }
+        else if (PART_Overflow.Visibility == Visibility.Visible)
+        {
+            var ohit = PART_Overflow.InputHitTest(e.GetPosition(PART_Overflow)) as DependencyObject;
+            if (ohit != null && FindAncestor<ListBoxItem>(ohit) is ListBoxItem oitem)
+                _dragSourceIndex = _gridCount + PART_Overflow.ItemContainerGenerator.IndexFromContainer(oitem);
+        }
     }
 
     private void OnPreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
@@ -700,12 +865,17 @@ public partial class SelectorWindow : Window
 
     private void UpdateHoverHighlight(System.Windows.Input.MouseEventArgs e)
     {
-        var hit = PART_List.InputHitTest(e.GetPosition(PART_List)) as DependencyObject;
-        if (hit == null) return;
-        if (FindAncestor<ListBoxItem>(hit)?.DataContext is SlotViewModel cell && cell != _vm.SelectedSlot)
-        {
-            _vm.SelectedSlot = cell;
-        }
+        if (HitRow(PART_List, e) is SlotViewModel cell && cell != _vm.SelectedSlot) { Select(cell); return; }
+        if (PART_Overflow.Visibility == Visibility.Visible
+            && HitRow(PART_Overflow, e) is SlotViewModel o && o != _vm.SelectedSlot)
+            Select(o);
+    }
+
+    private static SlotViewModel? HitRow(System.Windows.Controls.ListBox list, System.Windows.Input.MouseEventArgs e)
+    {
+        if (!list.IsVisible) return null;
+        var hit = list.InputHitTest(e.GetPosition(list)) as DependencyObject;
+        return hit == null ? null : FindAncestor<ListBoxItem>(hit)?.DataContext as SlotViewModel;
     }
 
     private void OnPreviewMouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
@@ -744,29 +914,56 @@ public partial class SelectorWindow : Window
         // 搜索模式：禁止拖动
         if (_vm.Level == SelectorLevel.Search) return DropTarget.None;
 
+        bool forceOrder = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
+        bool forceGroup = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
+
+        // 网格：左右两翼=排序，中间=并入
         for (int i = 0; i < _vm.Slots.Count; i++)
         {
             if (PART_List.ItemContainerGenerator.ContainerFromIndex(i) is not ListBoxItem item) continue;
-            if (item.ActualHeight <= 0) continue;
+            if (item.ActualWidth <= 0 || item.ActualHeight <= 0) continue;
 
-            var topLeft = item.PointToScreen(new System.Windows.Point(0, 0));
-            var bottomRight = item.PointToScreen(new System.Windows.Point(item.ActualWidth, item.ActualHeight));
-            if (screenPos.Y < topLeft.Y || screenPos.Y >= bottomRight.Y) continue;
+            var tl = item.PointToScreen(new System.Windows.Point(0, 0));
+            var br = item.PointToScreen(new System.Windows.Point(item.ActualWidth, item.ActualHeight));
+            if (screenPos.X < tl.X || screenPos.X >= br.X || screenPos.Y < tl.Y || screenPos.Y >= br.Y) continue;
 
-            double rel = (screenPos.Y - topLeft.Y) / (bottomRight.Y - topLeft.Y);
-            bool forceOrder = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
-            bool forceGroup = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
+            // 空占位格：不可并入，只当作"排到末尾"的落点
+            if (_vm.Slots[i].IsEmpty)
+                return _gridCount > 0
+                    ? new DropTarget(LogicalToFull(_gridCount - 1), DropMode.InsertAfter)
+                    : DropTarget.None;
 
+            double relX = (screenPos.X - tl.X) / (br.X - tl.X);
             if (forceGroup) return new DropTarget(i, DropMode.IntoSlot);
-            if (forceOrder) return new DropTarget(i, rel < 0.5 ? DropMode.InsertBefore : DropMode.InsertAfter);
-            if (rel < 0.25) return new DropTarget(i, DropMode.InsertBefore);
-            if (rel > 0.75) return new DropTarget(i, DropMode.InsertAfter);
+            if (forceOrder) return new DropTarget(i, relX < 0.5 ? DropMode.InsertBefore : DropMode.InsertAfter);
+            if (relX < 0.25) return new DropTarget(i, DropMode.InsertBefore);
+            if (relX > 0.75) return new DropTarget(i, DropMode.InsertAfter);
             return new DropTarget(i, DropMode.IntoSlot);
         }
 
+        // 溢出列表：上下两翼=排序，中间=并入
+        for (int i = 0; i < _vm.Overflow.Count; i++)
+        {
+            if (PART_Overflow.ItemContainerGenerator.ContainerFromIndex(i) is not ListBoxItem item) continue;
+            if (item.ActualHeight <= 0) continue;
+
+            var tl = item.PointToScreen(new System.Windows.Point(0, 0));
+            var br = item.PointToScreen(new System.Windows.Point(item.ActualWidth, item.ActualHeight));
+            if (screenPos.Y < tl.Y || screenPos.Y >= br.Y) continue;
+
+            double rel = (screenPos.Y - tl.Y) / (br.Y - tl.Y);
+            int full = KeyMap.Size + i;
+            if (forceGroup) return new DropTarget(full, DropMode.IntoSlot);
+            if (forceOrder) return new DropTarget(full, rel < 0.5 ? DropMode.InsertBefore : DropMode.InsertAfter);
+            if (rel < 0.25) return new DropTarget(full, DropMode.InsertBefore);
+            if (rel > 0.75) return new DropTarget(full, DropMode.InsertAfter);
+            return new DropTarget(full, DropMode.IntoSlot);
+        }
+
         // 落在列表空白处 → 追加到末尾
-        if (_vm.Slots.Count > 0 && IsOverElement(PART_List, screenPos))
-            return new DropTarget(_vm.Slots.Count - 1, DropMode.InsertAfter);
+        int total = _gridCount + _vm.Overflow.Count;
+        if (total > 0 && (IsOverElement(PART_List, screenPos) || IsOverElement(PART_Overflow, screenPos)))
+            return new DropTarget(LogicalToFull(total - 1), DropMode.InsertAfter);
 
         return DropTarget.None;
     }
@@ -786,34 +983,87 @@ public partial class SelectorWindow : Window
         _currentDrop = drop;
 
         foreach (var s in _vm.Slots) s.IsDropTarget = false;
+        foreach (var s in _vm.Overflow) s.IsDropTarget = false;
         _vm.BreadcrumbIsDropTarget = drop.Mode == DropMode.OutOfGroup;
         PART_InsertLine.Visibility = Visibility.Collapsed;
 
-        if (drop.Mode == DropMode.IntoSlot && drop.Index >= 0 && drop.Index < _vm.Slots.Count)
+        if (drop.Mode == DropMode.IntoSlot && drop.Index >= 0)
         {
             // 自己并入自己没有意义
-            if (drop.Index != _dragSourceIndex) _vm.Slots[drop.Index].IsDropTarget = true;
+            if (drop.Index != _dragSourceIndex) SetDropTarget(drop.Index, true);
             return;
         }
 
         if (drop.Mode is DropMode.InsertBefore or DropMode.InsertAfter && drop.Index >= 0)
         {
-            if (PART_List.ItemContainerGenerator.ContainerFromIndex(drop.Index) is not ListBoxItem item) return;
-            // 转到 PART_ListHost（PART_List 与 PART_DropLayer 的共同父级）。
-            // 不能转 PART_DropLayer —— 它是兄弟不是祖先，TransformToAncestor 会抛异常。
-            var p = item.TransformToAncestor(PART_ListHost).Transform(new System.Windows.Point(0, 0));
-            double y = drop.Mode == DropMode.InsertBefore ? p.Y : p.Y + item.ActualHeight;
+            if (!TryGetContainer(drop.Index, out var item)) return;
+            // 转到 PART_DropHost（溢出列与网格的共同父级，DropLayer 也在它里面）
+            var p = item.TransformToAncestor(PART_DropHost).Transform(new System.Windows.Point(0, 0));
 
-            PART_InsertLine.Width = item.ActualWidth;
-            Canvas.SetLeft(PART_InsertLine, p.X);
-            Canvas.SetTop(PART_InsertLine, y - 4);
+            if (drop.Index < _gridCount)
+            {
+                // 网格里"前后"是水平方向 → 竖线
+                double x = drop.Mode == DropMode.InsertBefore ? p.X : p.X + item.ActualWidth;
+                PART_InsertLine.Width = 2;
+                PART_InsertLine.Height = item.ActualHeight;
+                Canvas.SetLeft(PART_InsertLine, x - 1);
+                Canvas.SetTop(PART_InsertLine, p.Y);
+            }
+            else
+            {
+                // 溢出列表里"前后"是垂直方向 → 横线
+                double y = drop.Mode == DropMode.InsertBefore ? p.Y : p.Y + item.ActualHeight;
+                PART_InsertLine.Width = item.ActualWidth;
+                PART_InsertLine.Height = 2;
+                Canvas.SetLeft(PART_InsertLine, p.X);
+                Canvas.SetTop(PART_InsertLine, y - 1);
+            }
             PART_InsertLine.Visibility = Visibility.Visible;
+        }
+    }
+
+    /// <summary>取完整列表索引对应的容器（网格或溢出）。</summary>
+    private bool TryGetContainer(int fullIndex, out ListBoxItem item)
+    {
+        item = null!;
+        if (fullIndex < 0) return false;
+        if (fullIndex < KeyMap.Size)
+        {
+            if (fullIndex < _vm.Slots.Count
+                && PART_List.ItemContainerGenerator.ContainerFromIndex(fullIndex) is ListBoxItem it)
+            {
+                item = it;
+                return true;
+            }
+            return false;
+        }
+        int oi = fullIndex - KeyMap.Size;
+        if (oi >= 0 && oi < _vm.Overflow.Count
+            && PART_Overflow.ItemContainerGenerator.ContainerFromIndex(oi) is ListBoxItem oit)
+        {
+            item = oit;
+            return true;
+        }
+        return false;
+    }
+
+    private void SetDropTarget(int fullIndex, bool value)
+    {
+        if (fullIndex < KeyMap.Size)
+        {
+            if (fullIndex >= 0 && fullIndex < _vm.Slots.Count) _vm.Slots[fullIndex].IsDropTarget = value;
+        }
+        else
+        {
+            int oi = fullIndex - KeyMap.Size;
+            if (oi >= 0 && oi < _vm.Overflow.Count) _vm.Overflow[oi].IsDropTarget = value;
         }
     }
 
     private void ClearDropFeedback()
     {
         foreach (var s in _vm.Slots) s.IsDropTarget = false;
+        foreach (var s in _vm.Overflow) s.IsDropTarget = false;
         _vm.BreadcrumbIsDropTarget = false;
         PART_InsertLine.Visibility = Visibility.Collapsed;
     }
@@ -867,8 +1117,8 @@ public partial class SelectorWindow : Window
         if (_vm.Level == SelectorLevel.InGroup)
         {
             if (_openGroup == null || _openGroupIndex < 0) return;
-            if (source < 0 || source >= _vm.Slots.Count) return;
-            if (_vm.Slots.Count <= 1) return;
+            if (source < 0 || source >= _gridCount) return;
+            if (_gridCount <= 1) return;
 
             if (drop.Mode == DropMode.IntoSlot)
             {
@@ -881,7 +1131,7 @@ public partial class SelectorWindow : Window
                     return;
                 }
                 Logger.Info($"组内并成程序组合: {source} → {drop.Index}");
-                CommitGroupReorder(combined, _openGroupIndex, Math.Min(drop.Index, _vm.Slots.Count - 1));
+                CommitGroupReorder(combined, _openGroupIndex, Math.Min(drop.Index, _gridCount - 1));
                 return;
             }
 
@@ -942,11 +1192,7 @@ public partial class SelectorWindow : Window
         _vm.Breadcrumb = "";
         BuildRows(_topSlots);
 
-        if (selectIndex >= 0 && selectIndex < _vm.Slots.Count)
-        {
-            _vm.SelectedSlot = _vm.Slots[selectIndex];
-            PART_List.ScrollIntoView(_vm.SelectedSlot);
-        }
+        if (selectIndex >= 0) SelectByFullIndex(selectIndex);
         LayoutChanged?.Invoke(_topSlots);
     }
 
@@ -962,15 +1208,11 @@ public partial class SelectorWindow : Window
 
         // 选中项可能被这次操作移走了（移出分组），简单夹到合法范围即可
         int idx = selectIndex;
-        if (idx < 0 || idx >= _vm.Slots.Count)
+        if (idx < 0 || idx >= _gridCount)
         {
-            idx = Math.Min(Math.Max(0, idx), _vm.Slots.Count - 1);
+            idx = Math.Min(Math.Max(0, idx), Math.Max(0, _gridCount - 1));
         }
-        if (_vm.Slots.Count > 0)
-        {
-            _vm.SelectedSlot = _vm.Slots[idx];
-            PART_List.ScrollIntoView(_vm.SelectedSlot);
-        }
+        if (_gridCount > 0) Select(_vm.Slots[idx]);
         LayoutChanged?.Invoke(_topSlots);
     }
 
@@ -985,11 +1227,12 @@ public partial class SelectorWindow : Window
     {
         // 一级 / 二级都支持右键菜单
         if (_vm.Level == SelectorLevel.Search) return;
-        var hit = PART_List.InputHitTest(e.GetPosition(PART_List)) as DependencyObject;
-        if (hit == null || FindAncestor<ListBoxItem>(hit) is not ListBoxItem item) return;
-        if (item.DataContext is not SlotViewModel row) return;
 
-        _vm.SelectedSlot = row;
+        var row = HitRow(PART_List, e)
+            ?? (PART_Overflow.Visibility == Visibility.Visible ? HitRow(PART_Overflow, e) : null);
+        if (row == null) return;
+
+        Select(row);
         e.Handled = true;
         ShowRowMenu(row);
     }
@@ -1076,7 +1319,7 @@ public partial class SelectorWindow : Window
     /// <summary>一级重命名：改槽位本身（窗口或组）。</summary>
     private void RenameSlot(SlotViewModel row)
     {
-        int idx = _vm.Slots.IndexOf(row);
+        int idx = CurrentIndexOf(row);
         if (idx < 0 || idx >= _topSlots.Count) return;
 
         var slot = _topSlots[idx];
@@ -1141,11 +1384,7 @@ public partial class SelectorWindow : Window
             _topSlots = updated;
             _openGroup = updated[_openGroupIndex];
             BuildGroupRows(_openGroup);
-            if (memberIdx < _vm.Slots.Count)
-            {
-                _vm.SelectedSlot = _vm.Slots[memberIdx];
-                PART_List.ScrollIntoView(_vm.SelectedSlot);
-            }
+            if (memberIdx < _vm.Slots.Count) Select(_vm.Slots[memberIdx]);
             LayoutChanged?.Invoke(_topSlots);
             Activate();
             Focus();
@@ -1184,11 +1423,7 @@ public partial class SelectorWindow : Window
         _topSlots = slots;                                       // 关键：回写到字段，否则下次唤起还是旧名
         _openGroup = renamed;
         BuildGroupRows(renamed);
-        if (memberIdx < _vm.Slots.Count)
-        {
-            _vm.SelectedSlot = _vm.Slots[memberIdx];
-            PART_List.ScrollIntoView(_vm.SelectedSlot);
-        }
+        if (memberIdx < _vm.Slots.Count) Select(_vm.Slots[memberIdx]);
         LayoutChanged?.Invoke(_topSlots);
         Activate();
         Focus();
@@ -1198,7 +1433,7 @@ public partial class SelectorWindow : Window
     private void DissolveGroup(SlotViewModel row)
     {
         if (row.Slot.Kind != SlotKind.Group) return;
-        int idx = _vm.Slots.IndexOf(row);
+        int idx = CurrentIndexOf(row);
         if (idx < 0 || idx >= _topSlots.Count) return;
 
         var before = _topSlots.Count;
@@ -1211,7 +1446,7 @@ public partial class SelectorWindow : Window
     private void DissolveCombination(SlotViewModel row)
     {
         if (row.Slot.Kind != SlotKind.Combination) return;
-        int idx = _vm.Slots.IndexOf(row);
+        int idx = CurrentIndexOf(row);
         if (idx < 0) return;
 
         if (_vm.Level == SelectorLevel.InGroup)
@@ -1277,7 +1512,7 @@ public partial class SelectorWindow : Window
     /// <summary>把一个槽位从当前视图里去掉（不改持久化布局）。</summary>
     private void RemoveRowFromView(SlotViewModel row)
     {
-        int idx = _vm.Slots.IndexOf(row);
+        int idx = CurrentIndexOf(row);
         if (idx < 0) return;
 
         // 二级：从组里移除这个成员
@@ -1305,13 +1540,14 @@ public partial class SelectorWindow : Window
         SelectClamped(idx);
     }
 
-    private void SelectClamped(int idx)
+    private void SelectClamped(int fullIdx)
     {
-        if (_vm.Slots.Count == 0) { UpdatePreview(); return; }
-        int i = Math.Min(Math.Max(0, idx), _vm.Slots.Count - 1);
-        _vm.SelectedSlot = _vm.Slots[i];
-        PART_List.ScrollIntoView(_vm.SelectedSlot);
-        UpdatePreview();
+        int total = _gridCount + _vm.Overflow.Count;
+        if (total == 0) { UpdatePreview(); return; }
+        int logical = FullToLogical(fullIdx);
+        if (logical < 0) logical = 0;
+        logical = Math.Min(logical, total - 1);
+        SelectByFullIndex(LogicalToFull(logical));
     }
 
     /// <summary>
@@ -1348,8 +1584,8 @@ public partial class SelectorWindow : Window
 
     private void ShowDragGhost()
     {
-        if (_dragSourceIndex < 0 || _dragSourceIndex >= _vm.Slots.Count) return;
-        var cell = _vm.Slots[_dragSourceIndex];
+        var cell = CurrentRowAt(_dragSourceIndex);
+        if (cell == null) return;
         _ghostWindow = new Window
         {
             WindowStyle = WindowStyle.None,
@@ -1360,13 +1596,13 @@ public partial class SelectorWindow : Window
             ShowActivated = false,
             IsHitTestVisible = false,
             Focusable = false,
-            Width = 240, Height = 34,
+            Width = 96, Height = 96,
             Content = BuildGhostContent(cell),
         };
         var sp = System.Windows.Forms.Cursor.Position;
         var (dipX, dipY) = ScreenPxToDip(sp);
-        _ghostWindow.Left = dipX - 120;
-        _ghostWindow.Top = dipY - 17;
+        _ghostWindow.Left = dipX - 48;
+        _ghostWindow.Top = dipY - 48;
         _ghostWindow.Show();
 
         // 关键：Topmost 窗口正好压在光标底下时，光标消息会被它截走，
@@ -1383,8 +1619,8 @@ public partial class SelectorWindow : Window
     {
         if (_ghostWindow == null) return;
         var (dipX, dipY) = ScreenPxToDip(System.Windows.Forms.Cursor.Position);
-        _ghostWindow.Left = dipX - 120;
-        _ghostWindow.Top = dipY - 17;
+        _ghostWindow.Left = dipX - 48;
+        _ghostWindow.Top = dipY - 48;
     }
 
     private (double x, double y) ScreenPxToDip(System.Drawing.Point sp)
@@ -1440,8 +1676,8 @@ public partial class SelectorWindow : Window
             Effect = new DropShadowEffect { BlurRadius = 10, Opacity = 0.6, ShadowDepth = 3, Color = Colors.Black },
         };
         var grid = new Grid();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(34) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
         if (cell.Icon != null)
         {
@@ -1449,11 +1685,11 @@ public partial class SelectorWindow : Window
             {
                 Source = cell.Icon,
                 Stretch = Stretch.Uniform,
-                Width = 20, Height = 20,
+                Width = 40, Height = 40,
                 HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
                 VerticalAlignment = System.Windows.VerticalAlignment.Center,
             };
-            Grid.SetColumn(icon, 0);
+            Grid.SetRow(icon, 0);
             grid.Children.Add(icon);
         }
 
@@ -1461,13 +1697,12 @@ public partial class SelectorWindow : Window
         {
             Text = cell.IsContainer ? $"{cell.Name}  {cell.CountBadge}" : cell.Name,
             Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(221, 221, 221)),
-            FontSize = 12,
-            VerticalAlignment = System.Windows.VerticalAlignment.Center,
-            HorizontalAlignment = System.Windows.HorizontalAlignment.Left,
-            Margin = new Thickness(4, 0, 8, 0),
+            FontSize = 11,
+            TextAlignment = System.Windows.TextAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
+            Margin = new Thickness(4, 0, 4, 4),
         };
-        Grid.SetColumn(title, 1);
+        Grid.SetRow(title, 1);
         grid.Children.Add(title);
 
         border.Child = grid;

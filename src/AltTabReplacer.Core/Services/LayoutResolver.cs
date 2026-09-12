@@ -122,8 +122,7 @@ public static class LayoutResolver
     public static IReadOnlyList<ResolvedSlot> Resolve(
         IReadOnlyList<WindowInfo> windows,
         LayoutDocument layout,
-        int autoGroupThreshold = 2,
-        int pageSize = KeyMap.Size)
+        int autoGroupThreshold = 2)
     {
         if (windows.Count == 0) return Array.Empty<ResolvedSlot>();
 
@@ -144,16 +143,15 @@ public static class LayoutResolver
                 slots.Add(s);
         }
 
-        // ---- 2) 布局里没提到的进程，按 z-order 追加 ----
-        foreach (var group in remaining.GroupBy(w => w.ProcessName, StringComparer.OrdinalIgnoreCase))
-        {
-            var members = SortByZOrder(group.ToList(), windows);
-            foreach (var s in AutoSlots(SlotKind.Window, members, autoGroupThreshold, null, null, null))
-                slots.Add(s);
-        }
+        // ---- 2) 布局里没提到的窗口，按 z-order 各自占一个槽位 ----
+        // 不自动折叠：新开 / 新出现的程序各占一格，不会被悄悄并进某个自动组。
+        // 需要成组时由用户手动拖成"程序组 / 程序组合"。
+        foreach (var w in remaining)
+            slots.Add(MakeWindow(w, null, null));
 
-        // ---- 3) 溢出处理 ----
-        return ApplyOverflow(slots, pageSize);
+        // 溢出不在这里折叠：一页（16 键）放不下的槽位由 UI 放进"未入网格"列表，
+        // 而不是挤成一个"更多…"组——那样会把 16 号键也占掉。
+        return slots;
     }
 
     // ============================================================
@@ -555,51 +553,6 @@ public static class LayoutResolver
         proc.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
             ? proc[..^4]
             : proc;
-
-    // ============================================================
-    //  溢出
-    // ============================================================
-
-    /// <summary>槽位多于一页时，最后一格改成"更多…"组装下余量（平铺成窗口）。</summary>
-    private static IReadOnlyList<ResolvedSlot> ApplyOverflow(List<ResolvedSlot> slots, int pageSize)
-    {
-        if (pageSize <= 0 || slots.Count <= pageSize) return slots;
-
-        var head = slots.Take(pageSize - 1).ToList();
-        var tail = slots.Skip(pageSize - 1).ToList();
-
-        var overflowWindows = tail.SelectMany(s => s.Windows).ToList();
-        var overflowProcs = tail.SelectMany(s => s.Processes)
-                                .Distinct(StringComparer.OrdinalIgnoreCase)
-                                .ToList();
-        var overflowMembers = tail.SelectMany(SlotMemberSpecs).ToList();
-
-        head.Add(new ResolvedSlot
-        {
-            Kind = SlotKind.Group,
-            Name = $"更多… ({overflowWindows.Count})",
-            Windows = overflowWindows,
-            Processes = overflowProcs,
-            Members = overflowMembers,
-            IsOverflow = true,
-        });
-        return head;
-    }
-
-    /// <summary>把一个槽位的窗口展开成成员描述，带上各自的显示名（若有）。</summary>
-    private static IEnumerable<MemberSpec> SlotMemberSpecs(ResolvedSlot s)
-    {
-        for (int i = 0; i < s.Windows.Count; i++)
-        {
-            var w = s.Windows[i];
-            string? display = null;
-            if (s.Members is { Count: > 0 } && i < s.Members.Count)
-                display = s.Members[i].DisplayName;
-            else if (s.Kind == SlotKind.Window)
-                display = s.CustomName;
-            yield return new MemberSpec(w.ProcessName, w.Title) { DisplayName = display, Hwnd = (long)w.Hwnd };
-        }
-    }
 
     // ============================================================
     //  持久化
