@@ -62,7 +62,7 @@ public static class SlotEditor
         var procs = windows.Select(w => w.ProcessName)
                            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         list[groupIndex] = MakeSlot(group.Name, group.CustomName, windows, procs,
-            group.MemberOrder?.ToList(), members);
+            group.MemberOrder?.ToList(), members, group.Locked, group.Position);
         return list;
     }
 
@@ -314,6 +314,8 @@ public static class SlotEditor
             IsOverflow = group.IsOverflow,
             Members = members,
             MemberOrder = members == null ? windows.Select(w => w.Title).ToList() : null,
+            Locked = group.Locked,
+            Position = group.Position,
         };
         return outList;
     }
@@ -437,7 +439,8 @@ public static class SlotEditor
         string? movedDisplay = srcMembers?[idx].DisplayName;
 
         var list = slots.ToList();
-        list[groupIndex] = MakeSlot(group.Name, group.CustomName, restWindows, restProcs, restOrder, restMembers);
+        list[groupIndex] = MakeSlot(group.Name, group.CustomName, restWindows, restProcs, restOrder, restMembers,
+            group.Locked, group.Position);
         list.Insert(groupIndex + 1, MakeWindowSlot(window, movedDisplay, null));
         return list;
     }
@@ -476,6 +479,8 @@ public static class SlotEditor
             Processes = children.SelectMany(c => c.Processes)
                                 .Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
             IsEmptyGroup = children.Count == 0,
+            Locked = g.Locked,
+            Position = g.Position,
         };
     }
 
@@ -534,14 +539,16 @@ public static class SlotEditor
     private static ResolvedSlot MakeSlot(string? name, string? customName,
         List<WindowInfo> windows, List<string> procs,
         IReadOnlyList<string>? memberOrder = null,
-        IReadOnlyList<MemberSpec>? members = null)
+        IReadOnlyList<MemberSpec>? members = null,
+        bool locked = false, int? Position = null)
     {
         bool isGroup = windows.Count > 1;
 
         if (!isGroup)
         {
             string? display = members is { Count: > 0 } ? members[0].DisplayName : null;
-            return MakeWindowSlot(windows[0], display, customName);
+            var w = MakeWindowSlot(windows[0], display, customName);
+            return locked ? w.WithLock(true, Position) : w;
         }
 
         return new ResolvedSlot
@@ -553,6 +560,8 @@ public static class SlotEditor
             Processes = procs,
             MemberOrder = members is { Count: > 0 } ? null : memberOrder,
             Members = members,
+            Locked = locked,
+            Position = Position,
         };
     }
 }

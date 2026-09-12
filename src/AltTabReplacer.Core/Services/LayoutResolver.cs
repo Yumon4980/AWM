@@ -54,6 +54,12 @@ public sealed class ResolvedSlot
     /// <summary>手工创建的空程序组：没有成员也要显示在界面上。</summary>
     public bool IsEmptyGroup { get; init; }
 
+    /// <summary>锁定：固定占住 <see cref="Position"/> 键位，排序 / 删除都不移动它。</summary>
+    public bool Locked { get; init; }
+
+    /// <summary>显式键位索引（0..15）。null = 自动往前填。</summary>
+    public int? Position { get; set; }
+
     public WindowInfo? SingleWindow => Windows.Count > 0 ? Windows[0] : null;
     public int Count => Windows.Count;
 
@@ -71,6 +77,26 @@ public sealed class ResolvedSlot
         Members = RenameMembers(name),   // 必须带上：丢了它就退化成"该进程的全部窗口"
         NoAutoGroup = NoAutoGroup,
         IsEmptyGroup = IsEmptyGroup,
+        Locked = Locked,
+        Position = Position,
+    };
+
+    /// <summary>返回一个改了锁定状态的副本。解锁时清掉 <see cref="Position"/>。</summary>
+    public ResolvedSlot WithLock(bool locked, int? Position) => new()
+    {
+        Kind = Kind,
+        Name = Name,
+        CustomName = CustomName,
+        Windows = Windows,
+        Children = Children,
+        Processes = Processes,
+        IsOverflow = IsOverflow,
+        MemberOrder = MemberOrder,
+        Members = Members,
+        NoAutoGroup = NoAutoGroup,
+        IsEmptyGroup = IsEmptyGroup,
+        Locked = locked,
+        Position = locked ? Position : null,
     };
 
     /// <summary>
@@ -207,6 +233,8 @@ public static class LayoutResolver
             Windows = windows,
             Processes = refs.Select(r => r.Process).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
             Members = refs,   // 保留全部 refs（含未开的），按下时据此启动
+            Locked = def.Locked,
+            Position = def.Position,
         };
     }
 
@@ -248,6 +276,8 @@ public static class LayoutResolver
             Windows = windows,
             Processes = procs,
             IsEmptyGroup = children.Count == 0,
+            Locked = def.Locked,
+            Position = def.Position,
         };
     }
 
@@ -301,7 +331,7 @@ public static class LayoutResolver
             yield break;
         }
 
-        foreach (var s in AutoSlots(def.Kind, taken, autoGroupThreshold, def.Name, matchedSpecs, def.MemberOrder))
+        foreach (var s in AutoSlots(def.Kind, taken, autoGroupThreshold, def.Name, matchedSpecs, def.MemberOrder, def.Locked, def.Position))
             yield return s;
     }
 
@@ -311,7 +341,8 @@ public static class LayoutResolver
     /// </summary>
     private static IEnumerable<ResolvedSlot> AutoSlots(
         SlotKind declaredKind, List<WindowInfo> taken, int autoGroupThreshold,
-        string? name, IReadOnlyList<MemberSpec>? specs, IReadOnlyList<string>? memberOrder)
+        string? name, IReadOnlyList<MemberSpec>? specs, IReadOnlyList<string>? memberOrder,
+        bool locked = false, int? Position = null)
     {
         bool isGroup = taken.Count > 1
             && (declaredKind == SlotKind.Group || taken.Count >= autoGroupThreshold);
@@ -330,6 +361,8 @@ public static class LayoutResolver
                 Processes = ordered.Select(w => w.ProcessName).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
                 MemberOrder = specs is { Count: > 0 } ? null : memberOrder,
                 Members = specs,
+                Locked = locked,
+                Position = Position,
             };
             yield break;
         }
@@ -338,11 +371,12 @@ public static class LayoutResolver
         {
             bool named = !string.IsNullOrWhiteSpace(name);
             string? display = specs is { Count: > 0 } && i < specs.Count ? specs[i].DisplayName : null;
-            yield return MakeWindow(taken[i], display, named ? name : null);
+            yield return MakeWindow(taken[i], display, named ? name : null, locked, Position);
         }
     }
 
-    private static ResolvedSlot MakeWindow(WindowInfo w, string? display, string? customName)
+    private static ResolvedSlot MakeWindow(WindowInfo w, string? display, string? customName,
+        bool locked = false, int? Position = null)
     {
         string? effectiveCustom = !string.IsNullOrWhiteSpace(display) ? display : customName;
         return new ResolvedSlot
@@ -355,6 +389,8 @@ public static class LayoutResolver
             Windows = new[] { w },
             Processes = new[] { w.ProcessName },
             Members = new[] { new MemberSpec(w.ProcessName, w.Title) { DisplayName = display, Hwnd = (long)w.Hwnd } },
+            Locked = locked,
+            Position = Position,
         };
     }
 
@@ -598,6 +634,8 @@ public static class LayoutResolver
                 Kind = SlotKind.Group,
                 Name = s.CustomName,
                 Children = new List<SlotDefinition>(),
+                Locked = s.Locked,
+                Position = s.Position,
             };
             foreach (var c in s.Children)
                 AddDefinition(def.Children, c);
@@ -614,6 +652,8 @@ public static class LayoutResolver
                 Name = s.CustomName,
                 Processes = s.Processes.ToList(),
                 Members = s.Members.ToList(),
+                Locked = s.Locked,
+                Position = s.Position,
             });
             return;
         }
@@ -626,6 +666,8 @@ public static class LayoutResolver
             Name = s.CustomName,
             Processes = s.Processes.ToList(),
             MemberOrder = s.MemberOrder?.ToList(),
+            Locked = s.Locked,
+            Position = s.Position,
         });
     }
 }

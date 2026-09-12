@@ -103,7 +103,7 @@
                                HorizontalAlignment="Center" VerticalAlignment="Bottom"
                                TextTrimming="CharacterEllipsis" MaxWidth="120"/>
 
-                    <!-- 计数徽标（右上角，容器才有）+ 下一级箭头 -->
+                    <!-- 计数徽标 + 下一级箭头 + 锁定按钮（右上角） -->
                     <StackPanel Grid.Row="0" HorizontalAlignment="Right" VerticalAlignment="Top"
                                 Orientation="Horizontal" Margin="2">
                         <TextBlock Text="{Binding CountBadge}" Foreground="#FF9ACBF0" FontSize="10"
@@ -112,6 +112,11 @@
                         <TextBlock Text="›" Foreground="#FF9ACBF0" FontSize="13" FontWeight="Bold"
                                    VerticalAlignment="Center" Margin="0,0,2,0"
                                    Visibility="{Binding ArrowVisibility}"/>
+                        <Border Background="Transparent" Padding="3,1" Margin="1" Cursor="Hand"
+                                ToolTip="锁定：固定占住这个键位，排序/删除都不会移动它"
+                                PreviewMouseLeftButtonUp="OnLockToggleClick">
+                            <TextBlock Text="{Binding LockGlyph}" FontSize="11"/>
+                        </Border>
                     </StackPanel>
                 </Grid>
 

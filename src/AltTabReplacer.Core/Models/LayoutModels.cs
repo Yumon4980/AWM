@@ -120,6 +120,20 @@ public sealed class SlotDefinition
     /// 保留只为兼容已经落盘的旧布局。
     /// </summary>
     public bool NoAutoGroup { get; set; }
+
+    /// <summary>
+    /// 锁定：这个槽位固定占住 <see cref="Position"/> 键位，排序 / 删除都不会把它挤走。
+    /// </summary>
+    public bool Locked { get; set; }
+
+    /// <summary>
+    /// 显式键位索引（0..15）。null = 自动（按列表顺序往前填）。
+    ///
+    /// 拖动会把整张网格的位置固化下来（这样空槽位也会被保留），锁定时用它记住钉住的位置。
+    /// JSON 里仍叫 "PinIndex"（旧字段名），保证老布局能读回来。
+    /// </summary>
+    [JsonPropertyName("PinIndex")]
+    public int? Position { get; set; }
 }
 
 /// <summary>`layout.json` 的根对象。</summary>

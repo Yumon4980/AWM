@@ -43,6 +43,9 @@ public partial class SelectorWindow : Window
     /// <summary>网格里显示的槽位数 min(16, 当前层总数)；其余进左侧"未入网格"列表。</summary>
     private int _gridCount;
 
+    /// <summary>一级网格的稀疏排布：每个键位放哪个槽位，null = 空位。拖动后空位会被固化保留。</summary>
+    private ResolvedSlot?[] _grid = new ResolvedSlot?[KeyMap.Size];
+
     /// <summary>选中同步的防重入标志：程序化改 SelectedItem 时不要再回调 Select。</summary>
     private bool _syncingSelection;
 
@@ -193,19 +196,55 @@ public partial class SelectorWindow : Window
         _vm.Slots.Clear();
         _vm.Overflow.Clear();
 
-        // 前 16 个进 4×4 键位网格；放不下的进左侧"未入网格"列表。
-        _gridCount = Math.Min(KeyMap.Size, slots.Count);
-        for (int i = 0; i < _gridCount; i++)
-            _vm.Slots.Add(MakeRow(slots[i], KeyMap.LabelOf(i)));
+        // 锁定的槽位固定在自己的键位；未锁定的按列表顺序往前填满其余空位。
+        var (grid, overflow) = ArrangeGrid(slots);
+        _grid = grid;
+        _gridCount = grid.Count(s => s != null);
 
         // 始终 4×4：空位补不可触发的占位格，键位空间关系不随槽位数变化。
-        for (int i = _gridCount; i < KeyMap.Size; i++)
-            _vm.Slots.Add(SlotViewModel.Empty(KeyMap.LabelOf(i)));
+        for (int i = 0; i < KeyMap.Size; i++)
+        {
+            if (grid[i] != null) _vm.Slots.Add(MakeRow(grid[i]!, KeyMap.LabelOf(i)));
+            else _vm.Slots.Add(SlotViewModel.Empty(KeyMap.LabelOf(i)));
+        }
 
-        for (int i = KeyMap.Size; i < slots.Count; i++)
-            _vm.Overflow.Add(MakeRow(slots[i], ""));
+        foreach (var s in overflow) _vm.Overflow.Add(MakeRow(s, ""));
 
         Select(_vm.Slots.FirstOrDefault(r => !r.IsEmpty) ?? _vm.Overflow.FirstOrDefault());
+    }
+
+    /// <summary>
+    /// 把槽位列表排进 16 键位网格：
+    ///   1) 有显式位置（锁定 / 拖动固化过）的槽位先占住自己的键位；
+    ///   2) 其余槽位按列表顺序，从前往后填满剩余空位。
+    /// 装不下的进溢出列表。空位用 null 表示。
+    /// </summary>
+    private static (ResolvedSlot?[] grid, List<ResolvedSlot> overflow) ArrangeGrid(IReadOnlyList<ResolvedSlot> slots)
+    {
+        var grid = new ResolvedSlot?[KeyMap.Size];
+        var placed = new bool[slots.Count];
+
+        for (int i = 0; i < slots.Count; i++)
+        {
+            var s = slots[i];
+            if (s.Position is int p && p >= 0 && p < KeyMap.Size && grid[p] == null)
+            {
+                grid[p] = s;
+                placed[i] = true;
+            }
+        }
+
+        var overflow = new List<ResolvedSlot>();
+        int pos = 0;
+        for (int i = 0; i < slots.Count; i++)
+        {
+            if (placed[i]) continue;
+            while (pos < KeyMap.Size && grid[pos] != null) pos++;
+            if (pos < KeyMap.Size) grid[pos++] = slots[i];
+            else overflow.Add(slots[i]);
+        }
+
+        return (grid, overflow);
     }
 
     private SlotViewModel MakeRow(ResolvedSlot slot, string label)
@@ -373,22 +412,36 @@ public partial class SelectorWindow : Window
         return oi < _vm.Overflow.Count ? _vm.Overflow[oi] : null;
     }
 
-    /// <summary>行在"完整列表"里的索引（网格 0..15，溢出 16+）；找不到返回 -1。</summary>
+    /// <summary>行在"完整列表"里的位置（网格键位 0..15，溢出 16+）；找不到返回 -1。</summary>
     private int CurrentIndexOf(SlotViewModel row)
     {
         int gi = _vm.Slots.IndexOf(row);
-        if (gi >= 0 && gi < _gridCount) return gi;
+        if (gi >= 0 && !row.IsEmpty) return gi;
         int oi = _vm.Overflow.IndexOf(row);
         return oi >= 0 ? KeyMap.Size + oi : -1;
     }
 
-    /// <summary>逻辑索引（网格与溢出连续 0..N-1）→ 完整列表索引。</summary>
-    private int LogicalToFull(int logical) =>
-        logical < _gridCount ? logical : KeyMap.Size + (logical - _gridCount);
+    /// <summary>键位 / 溢出位置 → 一级槽位列表 _topSlots 里的索引；空位返回 -1。</summary>
+    private int TopIndexOfFull(int full)
+    {
+        var row = CurrentRowAt(full);
+        return row == null ? -1 : TopIndexOf(row.Slot);
+    }
 
-    /// <summary>完整列表索引 → 逻辑索引；-1 原样返回。</summary>
-    private int FullToLogical(int full) =>
-        full < 0 ? -1 : (full < _gridCount ? full : _gridCount + (full - KeyMap.Size));
+    /// <summary>键位 / 溢出位置 → 插入用的 _topSlots 索引（空位取其后第一个槽位的索引，没有则末尾）。</summary>
+    private int TopInsertIndexForFull(int full)
+    {
+        var row = CurrentRowAt(full);
+        if (row != null) return TopIndexOf(row.Slot);
+
+        if (full < KeyMap.Size)
+        {
+            for (int i = full + 1; i < KeyMap.Size; i++)
+                if (!_vm.Slots[i].IsEmpty) return TopIndexOf(_vm.Slots[i].Slot);
+            if (_vm.Overflow.Count > 0) return TopIndexOf(_vm.Overflow[0].Slot);
+        }
+        return _topSlots.Count;
+    }
 
     /// <summary>捕获当前选中项的代表窗口并显示在右侧预览区。</summary>
     private void UpdatePreview()
@@ -565,15 +618,15 @@ public partial class SelectorWindow : Window
         if (index >= rows.Count) return;        // 没有映射的键：忽略，不做任何事
         if (rows[index].IsEmpty) return;        // 空占位格不响应
 
-        ActivateRow(rows[index], index);
+        ActivateRow(rows[index]);
     }
 
     /// <summary>确认某个行：程序组进二级，程序组合打开全部，程序切过去。</summary>
-    private void ActivateRow(SlotViewModel row, int index)
+    private void ActivateRow(SlotViewModel row)
     {
         if (_vm.Level == SelectorLevel.Top && row.Slot.Kind == SlotKind.Group)
         {
-            EnterGroup(index, row.Slot);
+            EnterGroup(row);
             return;
         }
         if (row.Slot.Kind == SlotKind.Combination)
@@ -585,14 +638,19 @@ public partial class SelectorWindow : Window
     }
 
     /// <summary>进入某个组（二级）。</summary>
-    private void EnterGroup(int index, ResolvedSlot group)
+    private void EnterGroup(SlotViewModel row)
     {
-        _savedTopSelection = index;
+        var group = row.Slot;
+        int topIdx = TopIndexOf(group);   // SlotEditor 操作要用 _topSlots 索引
+        if (topIdx < 0) return;
+
+        int pos = CurrentIndexOf(row);           // 键位/溢出位置，回退时用它恢复高亮
+        _savedTopSelection = pos;
         _openGroup = group;
-        _openGroupIndex = index;
+        _openGroupIndex = topIdx;
         _vm.Level = SelectorLevel.InGroup;
-        _vm.Breadcrumb = index >= 0 && index < KeyMap.Size
-            ? $"{KeyMap.LabelOf(index)} › {group.Name}"
+        _vm.Breadcrumb = pos >= 0 && pos < KeyMap.Size
+            ? $"{KeyMap.LabelOf(pos)} › {group.Name}"
             : group.Name;
         BuildGroupRows(group);
         Logger.Info($"进入组: {group.Name} ({group.Count} 个窗口)");
@@ -685,62 +743,82 @@ public partial class SelectorWindow : Window
         Focus();
     }
 
-    /// <summary>Tab 用的线性移动：在"网格 + 溢出"整个列表里循环。</summary>
+    /// <summary>Tab 用的线性移动：在"网格非空位 + 溢出"里循环。</summary>
     private void MoveLinear(int delta)
     {
-        int total = _gridCount + _vm.Overflow.Count;
-        if (total == 0) return;
+        var order = NonEmptyOrder();
+        if (order.Count == 0) return;
 
-        int cur = _vm.SelectedSlot != null ? FullToLogical(CurrentIndexOf(_vm.SelectedSlot)) : -1;
+        int cur = _vm.SelectedSlot != null ? order.IndexOf(_vm.SelectedSlot) : -1;
         int next = cur < 0
-            ? (delta > 0 ? 0 : total - 1)
-            : ((cur + delta) % total + total) % total;
+            ? (delta > 0 ? 0 : order.Count - 1)
+            : ((cur + delta) % order.Count + order.Count) % order.Count;
 
-        SelectByFullIndex(LogicalToFull(next));
+        Select(order[next]);
     }
 
-    /// <summary>方向键：网格内按 2D 走（和物理键位一致），上下可进出左侧溢出列表。</summary>
+    /// <summary>方向键：网格内按 2D 走（和物理键位一致，跳过空位），上下可进出左侧溢出列表。</summary>
     private void MoveGrid(int dx, int dy)
     {
-        int gridN = _gridCount;
-        int overflowN = _vm.Overflow.Count;
-        if (gridN + overflowN == 0) return;
+        if (_vm.Slots.All(r => r.IsEmpty) && _vm.Overflow.Count == 0) return;
 
-        int cur = _vm.SelectedSlot != null ? FullToLogical(CurrentIndexOf(_vm.SelectedSlot)) : -1;
-        if (cur < 0) { SelectByFullIndex(LogicalToFull(0)); return; }
+        int cur = _vm.SelectedSlot != null ? CurrentIndexOf(_vm.SelectedSlot) : -1;
+        if (cur < 0) { var first = FirstNonEmpty(); if (first != null) Select(first); return; }
 
-        if (cur < gridN)
+        if (cur < KeyMap.Size)
         {
             int row = cur / KeyMap.Cols;
             int col = cur % KeyMap.Cols;
 
             if (dx != 0)
             {
-                int nc = col + dx;
-                if (nc < 0 || nc >= KeyMap.Cols) return;
-                int ni = row * KeyMap.Cols + nc;
-                if (ni < gridN) SelectByFullIndex(LogicalToFull(ni));
+                for (int c = col + dx; c >= 0 && c < KeyMap.Cols; c += dx)
+                {
+                    int ni = row * KeyMap.Cols + c;
+                    if (!_vm.Slots[ni].IsEmpty) { Select(_vm.Slots[ni]); return; }
+                }
                 return;
             }
 
             if (dy != 0)
             {
-                int ni = (row + dy) * KeyMap.Cols + col;
-                if (ni >= 0 && ni < gridN) { SelectByFullIndex(LogicalToFull(ni)); return; }
-                if (dy > 0 && overflowN > 0) SelectByFullIndex(LogicalToFull(gridN));   // 往下进溢出列表
+                for (int r = row + dy; r >= 0 && r < KeyMap.Rows; r += dy)
+                {
+                    int ni = r * KeyMap.Cols + col;
+                    if (ni < _vm.Slots.Count && !_vm.Slots[ni].IsEmpty) { Select(_vm.Slots[ni]); return; }
+                }
+                if (dy > 0 && _vm.Overflow.Count > 0) Select(_vm.Overflow[0]);   // 往下进溢出列表
                 return;
             }
             return;
         }
 
-        // 溢出列表内：上下移动，往上越界回到网格最后一条
-        int oi = cur - gridN;
+        // 溢出列表内：上下移动，往上越界回到网格最后一个非空位
+        int oi = cur - KeyMap.Size;
         if (dy != 0)
         {
             int noi = oi + dy;
-            if (noi >= 0 && noi < overflowN) { SelectByFullIndex(LogicalToFull(gridN + noi)); return; }
-            if (noi < 0 && gridN > 0) SelectByFullIndex(LogicalToFull(gridN - 1));
+            if (noi >= 0 && noi < _vm.Overflow.Count) { Select(_vm.Overflow[noi]); return; }
+            if (noi < 0)
+            {
+                for (int i = _vm.Slots.Count - 1; i >= 0; i--)
+                    if (!_vm.Slots[i].IsEmpty) { Select(_vm.Slots[i]); return; }
+            }
         }
+    }
+
+    private List<SlotViewModel> NonEmptyOrder()
+    {
+        var order = new List<SlotViewModel>();
+        foreach (var r in _vm.Slots) if (!r.IsEmpty) order.Add(r);
+        order.AddRange(_vm.Overflow);
+        return order;
+    }
+
+    private SlotViewModel? FirstNonEmpty()
+    {
+        foreach (var r in _vm.Slots) if (!r.IsEmpty) return r;
+        return _vm.Overflow.FirstOrDefault();
     }
 
     // ----------------------------------------------------------
@@ -752,7 +830,7 @@ public partial class SelectorWindow : Window
     {
         var sel = _vm.SelectedSlot;
         if (sel == null) { Cancel(); return; }
-        ActivateRow(sel, CurrentIndexOf(sel));
+        ActivateRow(sel);
     }
 
     private void ActivateAndClose(ResolvedSlot slot)
@@ -927,11 +1005,9 @@ public partial class SelectorWindow : Window
             var br = item.PointToScreen(new System.Windows.Point(item.ActualWidth, item.ActualHeight));
             if (screenPos.X < tl.X || screenPos.X >= br.X || screenPos.Y < tl.Y || screenPos.Y >= br.Y) continue;
 
-            // 空占位格：不可并入，只当作"排到末尾"的落点
+            // 空占位格：可以像真实槽位一样作为排序落点（把拖来的槽位挪到这个键位附近）
             if (_vm.Slots[i].IsEmpty)
-                return _gridCount > 0
-                    ? new DropTarget(LogicalToFull(_gridCount - 1), DropMode.InsertAfter)
-                    : DropTarget.None;
+                return new DropTarget(i, DropMode.InsertAfter);
 
             double relX = (screenPos.X - tl.X) / (br.X - tl.X);
             if (forceGroup) return new DropTarget(i, DropMode.IntoSlot);
@@ -961,11 +1037,19 @@ public partial class SelectorWindow : Window
         }
 
         // 落在列表空白处 → 追加到末尾
-        int total = _gridCount + _vm.Overflow.Count;
-        if (total > 0 && (IsOverElement(PART_List, screenPos) || IsOverElement(PART_Overflow, screenPos)))
-            return new DropTarget(LogicalToFull(total - 1), DropMode.InsertAfter);
+        int last = LastNonEmptyFullIndex();
+        if (last >= 0 && (IsOverElement(PART_List, screenPos) || IsOverElement(PART_Overflow, screenPos)))
+            return new DropTarget(last, DropMode.InsertAfter);
 
         return DropTarget.None;
+    }
+
+    private int LastNonEmptyFullIndex()
+    {
+        if (_vm.Overflow.Count > 0) return KeyMap.Size + _vm.Overflow.Count - 1;
+        for (int i = _vm.Slots.Count - 1; i >= 0; i--)
+            if (!_vm.Slots[i].IsEmpty) return i;
+        return -1;
     }
 
     private bool IsOverElement(FrameworkElement el, System.Drawing.Point screenPos)
@@ -1000,7 +1084,7 @@ public partial class SelectorWindow : Window
             // 转到 PART_DropHost（溢出列与网格的共同父级，DropLayer 也在它里面）
             var p = item.TransformToAncestor(PART_DropHost).Transform(new System.Windows.Point(0, 0));
 
-            if (drop.Index < _gridCount)
+            if (drop.Index < KeyMap.Size)
             {
                 // 网格里"前后"是水平方向 → 竖线
                 double x = drop.Mode == DropMode.InsertBefore ? p.X : p.X + item.ActualWidth;
@@ -1143,57 +1227,135 @@ public partial class SelectorWindow : Window
             return;
         }
 
-        // ---- 一级 ----
-        if (source >= _topSlots.Count || drop.Index < 0 || drop.Index >= _topSlots.Count) return;
-        if (source == drop.Index) return;
+        // ---- 一级：键位/溢出位置先换算成 _topSlots 索引 ----
+        int src = TopIndexOfFull(source);
+        if (src < 0) return;
+        if (_topSlots[src].Locked) { Logger.Info($"槽位已锁定，不能拖动: {_topSlots[src].Name}"); return; }
 
         if (drop.Mode == DropMode.IntoSlot)
         {
-            var target = _topSlots[drop.Index];
+            int dst = TopIndexOfFull(drop.Index);
+            if (dst < 0 || dst == src) return;       // 空位不能并入
+            var target = _topSlots[dst];
 
             // 目标是程序组 → 把 source 加进组
             if (target.Kind == SlotKind.Group)
             {
-                if (_topSlots[source].Kind == SlotKind.Group)
+                if (_topSlots[src].Kind == SlotKind.Group)
                 {
                     Logger.Info("程序组不能嵌套，忽略");
                     return;
                 }
-                var added = SlotEditor.AddToGroup(_topSlots, drop.Index, source);
+                var added = SlotEditor.AddToGroup(_topSlots, dst, src);
                 if (added == null) { Logger.Info("无法加入程序组"); return; }
-                Logger.Info($"加入程序组: {_topSlots[source].Name} → {target.Name}");
-                CommitLayout(added, Math.Min(drop.Index, added.Count - 1));
+                Logger.Info($"加入程序组: {_topSlots[src].Name} → {target.Name}");
+                CommitLayout(added, Math.Min(dst, added.Count - 1));
                 return;
             }
 
             // 目标是程序 / 程序组合 → 建/扩程序组合
-            var combo = SlotEditor.CreateCombination(_topSlots, source, drop.Index, ResolveExePath);
+            var combo = SlotEditor.CreateCombination(_topSlots, src, dst, ResolveExePath);
             if (combo == null)
             {
                 Logger.Info("程序组合最多 4 个程序，未加入");
                 return;
             }
-            Logger.Info($"程序组合: {_topSlots[source].Name} + {target.Name}");
-            CommitLayout(combo, Math.Min(drop.Index, combo.Count - 1));
+            Logger.Info($"程序组合: {_topSlots[src].Name} + {target.Name}");
+            CommitLayout(combo, Math.Min(dst, combo.Count - 1));
             return;
         }
 
-        int t = drop.Mode == DropMode.InsertAfter ? drop.Index + 1 : drop.Index;
-        Logger.Info($"重排: {source} → {t} ({_topSlots[source].Name})");
-        CommitLayout(SlotEditor.Reorder(_topSlots, source, t));
+        // 排序：网格内做"数组式移动"（空槽位一起让位、保留），涉及溢出才走列表插入
+        if (source < KeyMap.Size && drop.Index < KeyMap.Size)
+        {
+            MoveInGrid(source, drop.Index);
+            return;
+        }
+
+        int t = TopInsertIndexForFull(drop.Index);
+        if (drop.Mode == DropMode.InsertAfter) t++;
+        t = Math.Clamp(t, 0, _topSlots.Count);
+        Logger.Info($"重排: {src} → {t} ({_topSlots[src].Name})");
+        CommitLayout(SlotEditor.Reorder(_topSlots, src, t));
     }
 
-    private void CommitLayout(IReadOnlyList<ResolvedSlot> slots, int selectIndex = -1)
+    /// <summary>
+    /// 网格内数组式移动：把 from 键位的槽位移到 to 键位，中间的槽位（含空位）依次让位。
+    /// 例：A B C _ _ _ 把 B 拖到最后一格 → A C _ _ _ B。
+    /// 移动后把每个槽位的显式位置固化下来，空槽位因此能保留。
+    /// </summary>
+    private void MoveInGrid(int from, int to)
+    {
+        if (from < 0 || from >= KeyMap.Size || to < 0 || to >= KeyMap.Size || from == to) return;
+        var moving = _grid[from];
+        if (moving == null) return;
+
+        if (from < to)
+            for (int i = from; i < to; i++) _grid[i] = _grid[i + 1];
+        else
+            for (int i = from; i > to; i--) _grid[i] = _grid[i - 1];
+        _grid[to] = moving;
+
+        CommitGrid(moving);
+    }
+
+    /// <summary>把 _grid 的键位固化到各槽位，重建 _topSlots / 视图并落盘。</summary>
+    private void CommitGrid(ResolvedSlot? select = null)
+    {
+        var slots = new List<ResolvedSlot>();
+        for (int i = 0; i < KeyMap.Size; i++)
+        {
+            var s = _grid[i];
+            if (s == null) continue;
+            s.Position = i;
+            slots.Add(s);
+        }
+        foreach (var r in _vm.Overflow)
+        {
+            r.Slot.Position = null;     // 溢出项没有键位
+            slots.Add(r.Slot);
+        }
+
+        _topSlots = slots;
+        BuildRows(_topSlots);
+        if (select != null) SelectTopIndex(TopIndexOf(select));
+        LayoutChanged?.Invoke(_topSlots);
+    }
+
+    private void CommitLayout(IReadOnlyList<ResolvedSlot> slots, int selectIndex = -1, bool compact = true)
     {
         _topSlots = slots;
+        // 结构变化（删除/成组/解散）后清掉未锁定槽位的显式位置，让它们自动往前补；
+        // 纯重命名不该打乱已经拖出来的空位，所以传 compact:false。
+        if (compact)
+            foreach (var s in slots)
+                if (!s.Locked) s.Position = null;
+
         _openGroup = null;
         _openGroupIndex = -1;
         _vm.Level = SelectorLevel.Top;
         _vm.Breadcrumb = "";
         BuildRows(_topSlots);
 
-        if (selectIndex >= 0) SelectByFullIndex(selectIndex);
+        if (selectIndex >= 0) SelectTopIndex(selectIndex);
         LayoutChanged?.Invoke(_topSlots);
+    }
+
+    /// <summary>槽位在一级列表 _topSlots 里的索引（按引用）；找不到返回 -1。</summary>
+    private int TopIndexOf(ResolvedSlot slot)
+    {
+        for (int i = 0; i < _topSlots.Count; i++)
+            if (ReferenceEquals(_topSlots[i], slot)) return i;
+        return -1;
+    }
+
+    /// <summary>按 _topSlots 列表索引选中对应的行（网格或溢出）。</summary>
+    private void SelectTopIndex(int topIndex)
+    {
+        if (topIndex < 0 || topIndex >= _topSlots.Count) return;
+        var slot = _topSlots[topIndex];
+        foreach (var r in _vm.Slots) if (!r.IsEmpty && ReferenceEquals(r.Slot, slot)) { Select(r); return; }
+        foreach (var r in _vm.Overflow) if (ReferenceEquals(r.Slot, slot)) { Select(r); return; }
     }
 
     /// <summary>组内操作落盘（排序 / 移出），并**留在二级**。</summary>
@@ -1316,11 +1478,33 @@ public partial class SelectorWindow : Window
         if (row != null) RemoveFromGroup(row);
     }
 
+    /// <summary>点击格子右上角的锁：锁定 / 解锁。锁定时记住当前键位，排序 / 删除都不会移动它。</summary>
+    private void OnLockToggleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        e.Handled = true;      // 别让这次点击冒泡到 ListBox 触发"确认切换"
+        if (sender is not FrameworkElement fe || fe.DataContext is not SlotViewModel row) return;
+        if (row.IsEmpty) return;
+
+        int pos = CurrentIndexOf(row);
+        if (pos < 0 || pos >= KeyMap.Size) return;      // 只有网格里的槽位能锁定
+
+        var slots = _topSlots.ToList();
+        int idx = slots.IndexOf(row.Slot);
+        if (idx < 0) return;
+
+        bool locked = !slots[idx].Locked;
+        slots[idx] = slots[idx].WithLock(locked, locked ? pos : null);
+        Logger.Info($"{(locked ? "锁定" : "解锁")}: {row.Name} @ {KeyMap.LabelOf(pos)}");
+        CommitLayout(slots, idx);
+        Activate();
+        Focus();
+    }
+
     /// <summary>一级重命名：改槽位本身（窗口或组）。</summary>
     private void RenameSlot(SlotViewModel row)
     {
-        int idx = CurrentIndexOf(row);
-        if (idx < 0 || idx >= _topSlots.Count) return;
+        int idx = TopIndexOf(row.Slot);
+        if (idx < 0) return;
 
         var slot = _topSlots[idx];
         string title = slot.Kind switch
@@ -1344,7 +1528,7 @@ public partial class SelectorWindow : Window
         var slots = _topSlots.ToList();
         slots[idx] = slot.WithName(result);
         Logger.Info($"重命名: {slot.Name} → {(string.IsNullOrWhiteSpace(result) ? "(默认名)" : result)}");
-        CommitLayout(slots, idx);
+        CommitLayout(slots, idx, compact: false);
         Activate();
         Focus();
     }
@@ -1433,8 +1617,8 @@ public partial class SelectorWindow : Window
     private void DissolveGroup(SlotViewModel row)
     {
         if (row.Slot.Kind != SlotKind.Group) return;
-        int idx = CurrentIndexOf(row);
-        if (idx < 0 || idx >= _topSlots.Count) return;
+        int idx = TopIndexOf(row.Slot);
+        if (idx < 0) return;
 
         var before = _topSlots.Count;
         var slots = SlotEditor.DeleteGroup(_topSlots, idx);
@@ -1446,19 +1630,21 @@ public partial class SelectorWindow : Window
     private void DissolveCombination(SlotViewModel row)
     {
         if (row.Slot.Kind != SlotKind.Combination) return;
-        int idx = CurrentIndexOf(row);
-        if (idx < 0) return;
 
         if (_vm.Level == SelectorLevel.InGroup)
         {
             if (_openGroup == null || _openGroupIndex < 0) return;
-            var result = SlotEditor.DissolveCombinationInGroup(_topSlots, _openGroupIndex, idx);
+            int cidx = _vm.Slots.IndexOf(row);       // 组内子项索引
+            if (cidx < 0) return;
+            var result = SlotEditor.DissolveCombinationInGroup(_topSlots, _openGroupIndex, cidx);
             if (result == null) return;
             Logger.Info($"解散程序组合(组内): {row.Name}");
-            CommitGroupReorder(result, _openGroupIndex, idx);
+            CommitGroupReorder(result, _openGroupIndex, cidx);
             return;
         }
 
+        int idx = TopIndexOf(row.Slot);
+        if (idx < 0) return;
         var slots = SlotEditor.DissolveCombination(_topSlots, idx);
         Logger.Info($"解散程序组合: {row.Name}");
         CommitLayout(slots, idx);
@@ -1512,13 +1698,12 @@ public partial class SelectorWindow : Window
     /// <summary>把一个槽位从当前视图里去掉（不改持久化布局）。</summary>
     private void RemoveRowFromView(SlotViewModel row)
     {
-        int idx = CurrentIndexOf(row);
-        if (idx < 0) return;
-
         // 二级：从组里移除这个成员
         if (_vm.Level == SelectorLevel.InGroup && _openGroup != null && _openGroupIndex >= 0)
         {
-            var result = SlotEditor.RemoveMemberFromGroup(_topSlots, _openGroupIndex, idx);
+            int memberIdx = _vm.Slots.IndexOf(row);
+            if (memberIdx < 0) return;
+            var result = SlotEditor.RemoveMemberFromGroup(_topSlots, _openGroupIndex, memberIdx);
             if (result == null) return;
             _topSlots = result;
 
@@ -1530,24 +1715,30 @@ public partial class SelectorWindow : Window
 
             _openGroup = g;
             BuildGroupRows(g);
-            SelectClamped(idx);
+            SelectClamped(memberIdx);
             return;
         }
 
-        // 一级：直接移除
+        // 一级：直接移除；未锁定槽位清掉显式位置，自动往前补
+        int idx = TopIndexOf(row.Slot);
+        if (idx < 0) return;
         _topSlots = SlotEditor.RemoveAt(_topSlots, idx);
+        foreach (var s in _topSlots)
+            if (!s.Locked) s.Position = null;
         BuildRows(_topSlots);
-        SelectClamped(idx);
+        SelectTopIndex(Math.Min(idx, _topSlots.Count - 1));
     }
 
     private void SelectClamped(int fullIdx)
     {
-        int total = _gridCount + _vm.Overflow.Count;
-        if (total == 0) { UpdatePreview(); return; }
-        int logical = FullToLogical(fullIdx);
-        if (logical < 0) logical = 0;
-        logical = Math.Min(logical, total - 1);
-        SelectByFullIndex(LogicalToFull(logical));
+        if (fullIdx < 0) fullIdx = 0;
+        // 从期望位置往后找第一个非空；没有就回退
+        for (int i = fullIdx; i < _vm.Slots.Count; i++)
+            if (!_vm.Slots[i].IsEmpty) { Select(_vm.Slots[i]); return; }
+        if (_vm.Overflow.Count > 0) { Select(_vm.Overflow[0]); return; }
+        for (int i = _vm.Slots.Count - 1; i >= 0; i--)
+            if (!_vm.Slots[i].IsEmpty) { Select(_vm.Slots[i]); return; }
+        UpdatePreview();
     }
 
     /// <summary>
