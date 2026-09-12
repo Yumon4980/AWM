@@ -81,8 +81,11 @@ public sealed class ResolvedSlot
         Position = Position,
     };
 
-    /// <summary>返回一个改了锁定状态的副本。解锁时清掉 <see cref="Position"/>。</summary>
-    public ResolvedSlot WithLock(bool locked, int? Position) => new()
+    /// <summary>
+    /// 返回一个改了锁定状态的副本。键位由调用方决定 —— 切换锁定时传当前位置，
+    /// 这样锁定/解锁都不会让本格或其它格挪位。
+    /// </summary>
+    public ResolvedSlot WithLock(bool locked, int? position) => new()
     {
         Kind = Kind,
         Name = Name,
@@ -96,7 +99,7 @@ public sealed class ResolvedSlot
         NoAutoGroup = NoAutoGroup,
         IsEmptyGroup = IsEmptyGroup,
         Locked = locked,
-        Position = locked ? Position : null,
+        Position = position,
     };
 
     /// <summary>

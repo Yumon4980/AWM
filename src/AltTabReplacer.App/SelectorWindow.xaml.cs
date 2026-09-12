@@ -224,6 +224,7 @@ public partial class SelectorWindow : Window
         var grid = new ResolvedSlot?[KeyMap.Size];
         var placed = new bool[slots.Count];
 
+        // 1) 有显式键位（0..15）的槽位先就位
         for (int i = 0; i < slots.Count; i++)
         {
             var s = slots[i];
@@ -234,11 +235,13 @@ public partial class SelectorWindow : Window
             }
         }
 
+        // 2) 其余槽位：Position<0 = 强制留在"未入网格"区；Position=null = 自动填第一个空位
         var overflow = new List<ResolvedSlot>();
         int pos = 0;
         for (int i = 0; i < slots.Count; i++)
         {
             if (placed[i]) continue;
+            if (slots[i].Position is < 0) { overflow.Add(slots[i]); continue; }
             while (pos < KeyMap.Size && grid[pos] != null) pos++;
             if (pos < KeyMap.Size) grid[pos++] = slots[i];
             else overflow.Add(slots[i]);
@@ -612,6 +615,8 @@ public partial class SelectorWindow : Window
     public void HandleVk(int vk)
     {
         if (_vm.Level == SelectorLevel.Search) return;
+        // Ctrl 按着时不响应索引键：Ctrl+1/2/3/4 这类快捷键让给系统 / 前台程序
+        if ((Keyboard.Modifiers & ModifierKeys.Control) != 0) return;
         if (KeyMap.ToIndex(vk) is not int index) return;
 
         var rows = _vm.Slots;                    // 只有 4×4 网格里的行有索引键
@@ -901,7 +906,7 @@ public partial class SelectorWindow : Window
         {
             var ohit = PART_Overflow.InputHitTest(e.GetPosition(PART_Overflow)) as DependencyObject;
             if (ohit != null && FindAncestor<ListBoxItem>(ohit) is ListBoxItem oitem)
-                _dragSourceIndex = _gridCount + PART_Overflow.ItemContainerGenerator.IndexFromContainer(oitem);
+                _dragSourceIndex = KeyMap.Size + PART_Overflow.ItemContainerGenerator.IndexFromContainer(oitem);
         }
     }
 
@@ -1005,9 +1010,13 @@ public partial class SelectorWindow : Window
             var br = item.PointToScreen(new System.Windows.Point(item.ActualWidth, item.ActualHeight));
             if (screenPos.X < tl.X || screenPos.X >= br.X || screenPos.Y < tl.Y || screenPos.Y >= br.Y) continue;
 
-            // 空占位格：可以像真实槽位一样作为排序落点（把拖来的槽位挪到这个键位附近）
+            // 空占位格：不能并入，但和真实槽位一样按左右半边判断排序落点
+            //   （左半边 = 插到它前面，右半边 = 插到它后面）
             if (_vm.Slots[i].IsEmpty)
-                return new DropTarget(i, DropMode.InsertAfter);
+            {
+                double relE = (screenPos.X - tl.X) / (br.X - tl.X);
+                return new DropTarget(i, relE < 0.5 ? DropMode.InsertBefore : DropMode.InsertAfter);
+            }
 
             double relX = (screenPos.X - tl.X) / (br.X - tl.X);
             if (forceGroup) return new DropTarget(i, DropMode.IntoSlot);
@@ -1036,9 +1045,13 @@ public partial class SelectorWindow : Window
             return new DropTarget(full, DropMode.IntoSlot);
         }
 
-        // 落在列表空白处 → 追加到末尾
+        // 落在"未入网格"区（哪怕为空）→ 追加到未入网格末尾
+        if (IsOverElement(PART_OverflowHost, screenPos))
+            return new DropTarget(KeyMap.Size + _vm.Overflow.Count, DropMode.InsertAfter);
+
+        // 落在网格空白处 → 追加到网格末尾
         int last = LastNonEmptyFullIndex();
-        if (last >= 0 && (IsOverElement(PART_List, screenPos) || IsOverElement(PART_Overflow, screenPos)))
+        if (last >= 0 && IsOverElement(PART_List, screenPos))
             return new DropTarget(last, DropMode.InsertAfter);
 
         return DropTarget.None;
@@ -1232,24 +1245,37 @@ public partial class SelectorWindow : Window
         if (src < 0) return;
         if (_topSlots[src].Locked) { Logger.Info($"槽位已锁定，不能拖动: {_topSlots[src].Name}"); return; }
 
+        // 并入（网格 / 未入网格逻辑相同）：目标是程序组 → 加进组；否则 → 建/扩程序组合
         if (drop.Mode == DropMode.IntoSlot)
         {
             int dst = TopIndexOfFull(drop.Index);
             if (dst < 0 || dst == src) return;       // 空位不能并入
             var target = _topSlots[dst];
+            int targetPin = GridPinOf(target);       // 目标在网格里的键位；未入网格 = -1
 
-            // 目标是程序组 → 把 source 加进组
+            // 程序组不能合成组合：合并后程序组本身的"包含关系"就没了
+            if (_topSlots[src].Kind == SlotKind.Group)
+            {
+                Logger.Info($"程序组不能合成组合: {_topSlots[src].Name}");
+                return;
+            }
+
+            // 目标是程序组 → 把 source 加进组（**程序组位置不变**）
             if (target.Kind == SlotKind.Group)
             {
-                if (_topSlots[src].Kind == SlotKind.Group)
-                {
-                    Logger.Info("程序组不能嵌套，忽略");
-                    return;
-                }
                 var added = SlotEditor.AddToGroup(_topSlots, dst, src);
                 if (added == null) { Logger.Info("无法加入程序组"); return; }
+                int gi = dst > src ? dst - 1 : dst;      // 源被移除后组左移一位
+                if (gi >= 0 && gi < added.Count) added[gi].Position = targetPin;   // 钉住程序组的位置
                 Logger.Info($"加入程序组: {_topSlots[src].Name} → {target.Name}");
-                CommitLayout(added, Math.Min(dst, added.Count - 1));
+                CommitLayout(added, Math.Min(gi, added.Count - 1), compact: false);
+                return;
+            }
+
+            // 目标是锁定的程序 / 程序组合：合并后它就消失了，不能动
+            if (target.Locked)
+            {
+                Logger.Info($"锁定的程序不能被合并进组合: {target.Name}");
                 return;
             }
 
@@ -1260,47 +1286,147 @@ public partial class SelectorWindow : Window
                 Logger.Info("程序组合最多 4 个程序，未加入");
                 return;
             }
+            // 结果组合继承目标的位置（网格键位 / 未入网格）
+            int comboIdx = dst > src ? dst - 1 : dst;      // 源被移除后目标左移一位
+            if (comboIdx >= 0 && comboIdx < combo.Count) combo[comboIdx].Position = targetPin;
             Logger.Info($"程序组合: {_topSlots[src].Name} + {target.Name}");
-            CommitLayout(combo, Math.Min(dst, combo.Count - 1));
+            CommitLayout(combo, Math.Min(comboIdx, combo.Count - 1), compact: false);
             return;
         }
 
-        // 排序：网格内做"数组式移动"（空槽位一起让位、保留），涉及溢出才走列表插入
+        // 网格 → 未入网格：把该槽位移出网格（源键位留空，不动其它格）
+        if (source < KeyMap.Size && drop.Index >= KeyMap.Size)
+        {
+            MoveGridSlotToOverflow(source);
+            return;
+        }
+
+        // 未入网格 → 拖回网格：插到目标键位，后面的内容往后挤
+        if (source >= KeyMap.Size && drop.Index < KeyMap.Size)
+        {
+            int target = drop.Index;
+            if (drop.Mode == DropMode.InsertAfter) target = drop.Index + 1;
+            target = Math.Clamp(target, 0, KeyMap.Size - 1);
+            Logger.Info($"未入网格 → 网格: {_topSlots[src].Name} @ {KeyMap.LabelOf(target)}");
+            InsertOverflowIntoGrid(_topSlots[src], target);
+            return;
+        }
+
+        // 网格内"插入"（拖到 P 的右半边插到 P+1，左半边插到 P，后面的内容往后挤）
         if (source < KeyMap.Size && drop.Index < KeyMap.Size)
         {
-            MoveInGrid(source, drop.Index);
+            int target = drop.Index;
+            if (drop.Mode == DropMode.InsertAfter) target = drop.Index + 1;
+            target = Math.Clamp(target, 0, KeyMap.Size - 1);
+            if (target != source) InsertInGrid(source, target);
             return;
         }
 
+        // 未入网格内排序：只动未入网格列表，网格位置不动
         int t = TopInsertIndexForFull(drop.Index);
         if (drop.Mode == DropMode.InsertAfter) t++;
         t = Math.Clamp(t, 0, _topSlots.Count);
         Logger.Info($"重排: {src} → {t} ({_topSlots[src].Name})");
-        CommitLayout(SlotEditor.Reorder(_topSlots, src, t));
+        CommitLayout(SlotEditor.Reorder(_topSlots, src, t), compact: false);
+    }
+
+    /// <summary>槽位当前的网格键位（0..15）；在"未入网格"区返回 -1。</summary>
+    private int GridPinOf(ResolvedSlot slot)
+    {
+        for (int i = 0; i < KeyMap.Size; i++)
+            if (ReferenceEquals(_grid[i], slot)) return i;
+        return -1;
     }
 
     /// <summary>
-    /// 网格内数组式移动：把 from 键位的槽位移到 to 键位，中间的槽位（含空位）依次让位。
-    /// 例：A B C _ _ _ 把 B 拖到最后一格 → A C _ _ _ B。
-    /// 移动后把每个槽位的显式位置固化下来，空槽位因此能保留。
+    /// 网格内插入：把 from 键位的槽位插到 to 键位，后面的内容依次往右挤（"对方往后挤"）。
+    ///   - 空位不能作为拖动源（没内容可拖）；
+    ///   - 锁定槽位不能作为源，也不会被挤动（原地不动，后面的内容从它上方跨过去）；
+    ///   - 源位置留下一个空位。
+    /// 例：A B C _ _ 把 A 拖到 B 的右边（target=2）→ _ B A C _
     /// </summary>
-    private void MoveInGrid(int from, int to)
+    private void InsertInGrid(int from, int to)
     {
         if (from < 0 || from >= KeyMap.Size || to < 0 || to >= KeyMap.Size || from == to) return;
         var moving = _grid[from];
-        if (moving == null) return;
+        if (moving == null || moving.Locked) return;          // 空位 / 锁定槽位不能被拖动
+        if (_grid[to]?.Locked == true)                        // 锁定槽位不能被挤走
+        {
+            Logger.Info($"目标键位已锁定，不能占用: {_grid[to]!.Name}");
+            return;
+        }
 
-        if (from < to)
-            for (int i = from; i < to; i++) _grid[i] = _grid[i + 1];
-        else
-            for (int i = from; i > to; i--) _grid[i] = _grid[i - 1];
-        _grid[to] = moving;
+        _grid[from] = null;                                   // 源位置留空
 
-        CommitGrid(moving);
+        // 从 to 起把内容右移一格：锁定格原地不动，被它挡下的内容继续往右找位置
+        var carry = moving;
+        for (int i = to; i < KeyMap.Size && carry != null; i++)
+        {
+            if (_grid[i]?.Locked == true) continue;           // 锁定格不动
+            var next = _grid[i];
+            _grid[i] = carry;
+            carry = next;                                     // 原内容继续往右推
+        }
+
+        // carry 非空 = 被挤出最右边界 → 放进"未入网格"区（并随布局落盘，记忆化）
+        CommitGrid(moving, carry);
+    }
+
+    /// <summary>
+    /// 把"未入网格"区的槽位拖回网格：插到 to 键位，后面的内容往后挤（锁定格不动）。
+    /// 被挤出的内容回到"未入网格"区；被拖进来的槽位从溢出列表移除。
+    /// </summary>
+    private void InsertOverflowIntoGrid(ResolvedSlot moving, int to)
+    {
+        if (to < 0 || to >= KeyMap.Size) return;
+        if (_grid[to]?.Locked == true) { Logger.Info($"目标键位已锁定，不能占用: {_grid[to]!.Name}"); return; }
+
+        var carry = moving;
+        for (int i = to; i < KeyMap.Size && carry != null; i++)
+        {
+            if (_grid[i]?.Locked == true) continue;      // 锁定格不动
+            var next = _grid[i];
+            _grid[i] = carry;
+            carry = next;
+        }
+
+        RemoveFromOverflow(moving);
+        CommitGrid(moving, carry);
+    }
+
+    /// <summary>
+    /// 网格 → 未入网格：把 from 键位的槽位移出网格，放进"未入网格"区（记忆化）。
+    /// 源键位留空（其它格不动），锁定槽位不能移出。
+    /// </summary>
+    private void MoveGridSlotToOverflow(int from)
+    {
+        if (from < 0 || from >= KeyMap.Size) return;
+        var s = _grid[from];
+        if (s == null) return;
+        if (s.Locked) { Logger.Info($"锁定槽位不能移出网格: {s.Name}"); return; }
+
+        _grid[from] = null;                 // 源键位留空
+        Logger.Info($"网格 → 未入网格: {s.Name}");
+        CommitGrid(null, s);                // s 作为"被挤出"加入未入网格
+    }
+
+    /// <summary>把某个槽位从"未入网格"列表里移除（它已经进网格了）。</summary>
+    private void RemoveFromOverflow(ResolvedSlot slot)
+    {
+        for (int i = _vm.Overflow.Count - 1; i >= 0; i--)
+        {
+            if (ReferenceEquals(_vm.Overflow[i].Slot, slot))
+            {
+                _vm.Overflow.RemoveAt(i);
+                break;
+            }
+        }
     }
 
     /// <summary>把 _grid 的键位固化到各槽位，重建 _topSlots / 视图并落盘。</summary>
-    private void CommitGrid(ResolvedSlot? select = null)
+    /// <param name="select">重建后要选中的槽位。</param>
+    /// <param name="pushedOut">被挤出网格的槽位，放进"未入网格"区并落盘（记忆化）。</param>
+    private void CommitGrid(ResolvedSlot? select = null, ResolvedSlot? pushedOut = null)
     {
         var slots = new List<ResolvedSlot>();
         for (int i = 0; i < KeyMap.Size; i++)
@@ -1310,9 +1436,17 @@ public partial class SelectorWindow : Window
             s.Position = i;
             slots.Add(s);
         }
+
+        if (pushedOut != null)
+        {
+            pushedOut.Position = -1;        // <0 = 强制留在"未入网格"区（记忆化）
+            slots.Add(pushedOut);
+            Logger.Info($"挤出网格 → 未入网格: {pushedOut.Name}");
+        }
+
         foreach (var r in _vm.Overflow)
         {
-            r.Slot.Position = null;     // 溢出项没有键位
+            if (r.Slot.Position is null or >= 0) r.Slot.Position = -1;   // 溢出项没有键位
             slots.Add(r.Slot);
         }
 
@@ -1329,7 +1463,7 @@ public partial class SelectorWindow : Window
         // 纯重命名不该打乱已经拖出来的空位，所以传 compact:false。
         if (compact)
             foreach (var s in slots)
-                if (!s.Locked) s.Position = null;
+                if (!s.Locked && s.Position is >= 0) s.Position = null;   // -1（强制未入网格）保留
 
         _openGroup = null;
         _openGroupIndex = -1;
@@ -1493,9 +1627,10 @@ public partial class SelectorWindow : Window
         if (idx < 0) return;
 
         bool locked = !slots[idx].Locked;
-        slots[idx] = slots[idx].WithLock(locked, locked ? pos : null);
+        // 锁定 / 解锁都保留当前位置；且不让其它未锁定槽位被压缩（compact:false）
+        slots[idx] = slots[idx].WithLock(locked, pos);
         Logger.Info($"{(locked ? "锁定" : "解锁")}: {row.Name} @ {KeyMap.LabelOf(pos)}");
-        CommitLayout(slots, idx);
+        CommitLayout(slots, idx, compact: false);
         Activate();
         Focus();
     }
@@ -1619,17 +1754,23 @@ public partial class SelectorWindow : Window
         if (row.Slot.Kind != SlotKind.Group) return;
         int idx = TopIndexOf(row.Slot);
         if (idx < 0) return;
+        if (row.Slot.Locked) { Logger.Info($"已锁定的程序组不能解散: {row.Name}"); return; }
 
+        bool overflow = GridPinOf(row.Slot) < 0;    // 在未入网格区：拆出的成员也要留在那里
         var before = _topSlots.Count;
         var slots = SlotEditor.DeleteGroup(_topSlots, idx);
+        int pieceCount = slots.Count - (before - 1);
+        if (overflow)
+            for (int i = idx; i < idx + pieceCount && i < slots.Count; i++) slots[i].Position = -1;
         Logger.Info($"删除程序组: {row.Name} → {before} 个槽位变 {slots.Count} 个");
-        CommitLayout(slots, idx);
+        CommitLayout(slots, idx, compact: !overflow);
     }
 
     /// <summary>解散程序组合：一级摊成顶级程序槽位；二级摊成组内程序子项。</summary>
     private void DissolveCombination(SlotViewModel row)
     {
         if (row.Slot.Kind != SlotKind.Combination) return;
+        if (row.Slot.Locked) { Logger.Info($"已锁定的程序组合不能解散: {row.Name}"); return; }
 
         if (_vm.Level == SelectorLevel.InGroup)
         {
@@ -1645,9 +1786,14 @@ public partial class SelectorWindow : Window
 
         int idx = TopIndexOf(row.Slot);
         if (idx < 0) return;
+        bool overflow = GridPinOf(row.Slot) < 0;    // 在未入网格区：拆出的成员也要留在那里
+        var before = _topSlots.Count;
         var slots = SlotEditor.DissolveCombination(_topSlots, idx);
+        int pieceCount = slots.Count - (before - 1);
+        if (overflow)
+            for (int i = idx; i < idx + pieceCount && i < slots.Count; i++) slots[i].Position = -1;
         Logger.Info($"解散程序组合: {row.Name}");
-        CommitLayout(slots, idx);
+        CommitLayout(slots, idx, compact: !overflow);
     }
 
     /// <summary>左上角"+"：新建一个空程序组，之后把程序/程序组合拖到它上面即可加入。</summary>
@@ -1670,6 +1816,31 @@ public partial class SelectorWindow : Window
             _topSlots, string.IsNullOrWhiteSpace(name) ? "新程序组" : name);
         Logger.Info($"新建程序组: {name}");
         CommitLayout(slots, slots.Count - 1);
+        Activate();
+        Focus();
+    }
+
+    /// <summary>"未入网格"区的"+"：新建一个空程序组，直接放进未入网格区。</summary>
+    private void OnAddOverflowGroupClick(object sender, RoutedEventArgs e)
+    {
+        if (_vm.Level != SelectorLevel.Top) return;
+
+        string? name;
+        _suppressAutoClose = true;
+        SuspendIndexCaptureChanged?.Invoke(true);
+        try { name = RenameDialog.Show(this, "新建程序组", "新程序组"); }
+        finally
+        {
+            SuspendIndexCaptureChanged?.Invoke(false);
+            _suppressAutoClose = false;
+        }
+        if (name == null) return;   // 取消
+
+        var slots = SlotEditor.CreateEmptyGroup(
+            _topSlots, string.IsNullOrWhiteSpace(name) ? "新程序组" : name);
+        slots[^1].Position = -1;    // 强制留在未入网格区
+        Logger.Info($"在未入网格新建程序组: {name}");
+        CommitLayout(slots, slots.Count - 1, compact: false);
         Activate();
         Focus();
     }

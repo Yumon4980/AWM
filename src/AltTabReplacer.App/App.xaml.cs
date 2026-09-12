@@ -150,6 +150,8 @@ public partial class App : System.Windows.Application
             if (!_selectorActive || !e.IsDown) return LowLevelKeyboardHook.HookAction.Pass;
             // 搜索模式 / 重命名对话框期间，索引键要留给文本输入，不能再吞
             if (_suspendIndexCapture) return LowLevelKeyboardHook.HookAction.Pass;
+            // Ctrl 按着时不吞索引键：把 Ctrl+1/2/3/4 这类快捷键让给系统 / 前台程序
+            if (e.Ctrl) return LowLevelKeyboardHook.HookAction.Pass;
             return Core.KeyMap.ToIndex(e.Vk).HasValue
                 ? LowLevelKeyboardHook.HookAction.SwallowAndObserve
                 : LowLevelKeyboardHook.HookAction.Pass;
