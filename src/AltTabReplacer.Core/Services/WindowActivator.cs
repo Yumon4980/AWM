@@ -15,6 +15,7 @@ public sealed class WindowActivator
 {
     /// <summary>
     /// 打开一个程序组合：按成员顺序，已开则激活、未开则用 exe 启动。
+    /// 同进程只激活/启动一次（Members 可能多 ref 对应同一进程）。
     /// </summary>
     public void OpenCombination(ResolvedSlot combo)
     {
@@ -23,19 +24,22 @@ public sealed class WindowActivator
 
         var matchedProcs = new System.Collections.Generic.HashSet<string>(
             StringComparer.OrdinalIgnoreCase);
-        foreach (var w in combo.Windows) matchedProcs.Add(w.ProcessName);
-
-        // 已开的先激活
+        var activatedHwnds = new System.Collections.Generic.HashSet<IntPtr>();
         foreach (var w in combo.Windows)
         {
+            matchedProcs.Add(w.ProcessName);
+            if (!activatedHwnds.Add(w.Hwnd)) continue;
             try { Activate(w); }
             catch (Exception ex) { Logger.Error($"激活失败: {ex.Message}"); }
         }
 
-        // 未开的启动
+        // 未开的启动：同进程只启动一次（Members 可能多 ref 对应同一进程）
+        var launchedProcs = new System.Collections.Generic.HashSet<string>(
+            StringComparer.OrdinalIgnoreCase);
         foreach (var spec in refs)
         {
             if (matchedProcs.Contains(spec.Process)) continue;
+            if (!launchedProcs.Add(spec.Process)) continue;
             if (!string.IsNullOrEmpty(spec.ExePath)) Launch(spec.ExePath!);
             else Logger.Warn($"程序组合成员 {spec.Process} 没有可执行路径，无法启动");
         }

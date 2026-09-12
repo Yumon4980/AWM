@@ -231,6 +231,20 @@ internal static class NativeMethods
         ref SHFILEINFO psfi, uint cbFileInfo, uint uFlags);
 
     // ============================================================
+    //  GDI（截图时设视口原点，把客户区挪到 (0,0)）
+    // ============================================================
+
+    /// <summary>设置 DC 的视口原点；lpptOut 可为 NULL（不要旧值）。</summary>
+    [DllImport("gdi32.dll", EntryPoint = "SetViewportOrgEx", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetViewportOrgEx(IntPtr hdc, int x, int y, IntPtr lpptOut);
+
+    /// <summary>取窗口客户区矩形（坐标相对客户区左上角，原点恒为 (0,0)）。</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+    // ============================================================
     //  DWM (缩略图 / Cloaked)
     // ============================================================
 
@@ -250,7 +264,7 @@ internal static class NativeMethods
     public static extern int DwmQueryThumbnailSourceSize(IntPtr hThumbnail, out uint pSize);
 
     // ============================================================
-    //  Window capture (PrintWindow + GetWindowRect)
+    //  Window capture (PrintWindow + GetWindowRect + BitBlt 兜底)
     // ============================================================
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -260,6 +274,26 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
+
+    /// <summary>取窗口客户区 DC（坐标原点为客户区左上角）。</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr GetDC(IntPtr hWnd);
+
+    /// <summary>释放 GetDC 返回的 DC。</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+    /// <summary>块传输。CAPTUREBLT 让结果包含窗口之上的分层/透明像素。</summary>
+    [DllImport("gdi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool BitBlt(IntPtr hdcDest, int nXDest, int nYDest, int nWidth, int nHeight,
+        IntPtr hdcSrc, int nXSrc, int nYSrc, uint dwRop);
+
+    public const uint SRCCOPY = 0x00CC0020;
+
+    /// <summary>包含窗口之上的分层/半透明像素；不指定时 BitBlt 拷不到这些内容，画面会缺一块。</summary>
+    public const uint CAPTUREBLT = 0x40000000;
 
     // ============================================================
     //  IME (Input Method Editor)

@@ -497,23 +497,22 @@ public static class SlotEditor
             {
                 DisplayName = display,
                 ExePath = exe ?? exePath(w),
+                Hwnd = (long)w.Hwnd,
             });
         }
         return result;
     }
 
-    /// <summary>合并两组程序引用，按进程去重（同一个程序只留一个）。</summary>
+    /// <summary>
+    /// 合并两组程序引用：**不去重**，保留每一项。
+    ///
+    /// 之所以不去重：组合里的"两个 Chrome 窗口"是两个独立的 ref，
+    /// Resolve 时各 Claim 一个精确窗口，remaining 不会有剩余 Chrome，
+    /// 也就不会被追加循环当独立组吐回（修 bug3）。
+    /// 多个组合同进程时也各取各的，不会被第一个组合独占。
+    /// </summary>
     private static List<MemberSpec> MergeRefs(IEnumerable<MemberSpec> a, IEnumerable<MemberSpec> b)
-    {
-        var result = new List<MemberSpec>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var s in a.Concat(b))
-        {
-            if (string.IsNullOrEmpty(s.Process)) continue;
-            if (seen.Add(s.Process)) result.Add(s);
-        }
-        return result;
-    }
+        => a.Concat(b).Where(s => !string.IsNullOrEmpty(s.Process)).ToList();
 
     private static ResolvedSlot MakeWindowSlot(WindowInfo w, string? display, string? customName)
     {
@@ -527,7 +526,7 @@ public static class SlotEditor
             CustomName = effectiveCustom,
             Windows = new[] { w },
             Processes = new[] { w.ProcessName },
-            Members = new[] { new MemberSpec(w.ProcessName, w.Title) { DisplayName = display } },
+            Members = new[] { new MemberSpec(w.ProcessName, w.Title) { DisplayName = display, Hwnd = (long)w.Hwnd } },
         };
     }
 

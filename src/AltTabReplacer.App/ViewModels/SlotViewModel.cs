@@ -60,8 +60,47 @@ public sealed class SlotViewModel : INotifyPropertyChanged
         set { if (_isDropTarget == value) return; _isDropTarget = value; Notify(); }
     }
 
-    /// <summary>预览用的代表窗口：程序是它自己，容器是成员里最近激活的那个。</summary>
-    public WindowInfo? Representative => Slot.Count > 0 ? Slot.Windows[0] : null;
+    /// <summary>
+    /// 预览用的代表窗口：
+    ///   程序 = 它自己；
+    ///   程序组合 = **第一个成员（M[0]）** 的窗口（找不到才退回第一个打开的窗口）；
+    ///   程序组 = 第一个子项的代表窗口；若第一个子项是组合，取其第一个成员的窗口。
+    /// 这样预览永远是"第一个程序"，不会被 z-order / 打开顺序漂移影响。
+    /// </summary>
+    public WindowInfo? Representative
+    {
+        get
+        {
+            if (Slot.Count == 0) return null;
+
+            if (Slot.Kind == SlotKind.Combination && Slot.Members is { Count: > 0 })
+                return ResolveByFirstMember(Slot.Members[0], Slot.Windows) ?? Slot.Windows[0];
+
+            if (Slot.Kind == SlotKind.Group && Slot.Children is { Count: > 0 })
+            {
+                var first = Slot.Children[0];
+                if (first.Members is { Count: > 0 } && first.Windows.Count > 0)
+                    return ResolveByFirstMember(first.Members[0], first.Windows) ?? first.Windows[0];
+            }
+
+            return Slot.Windows[0];
+        }
+    }
+
+    /// <summary>按 (Process, [Title]) 在候选窗口里精确认领一个；标题为空时只比进程。</summary>
+    private static WindowInfo? ResolveByFirstMember(MemberSpec spec, IReadOnlyList<WindowInfo> windows)
+    {
+        foreach (var w in windows)
+        {
+            if (!string.Equals(w.ProcessName, spec.Process, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (!string.IsNullOrEmpty(spec.Title)
+                && !string.Equals(w.Title, spec.Title, StringComparison.OrdinalIgnoreCase))
+                continue;
+            return w;
+        }
+        return null;
+    }
 
     public SlotViewModel(ResolvedSlot slot, string keyLabel, BitmapSource? icon, IReadOnlyList<BitmapSource?> icons)
     {

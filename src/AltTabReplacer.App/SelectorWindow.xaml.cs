@@ -231,7 +231,7 @@ public partial class SelectorWindow : Window
                     Name = string.IsNullOrWhiteSpace(custom) ? w.Title : custom!,
                     Windows = new[] { w },
                     Processes = new[] { w.ProcessName },
-                    Members = new[] { new MemberSpec(w.ProcessName, w.Title) { DisplayName = custom } },
+                    Members = new[] { new MemberSpec(w.ProcessName, w.Title) { DisplayName = custom, Hwnd = (long)w.Hwnd } },
                 };
                 _vm.Slots.Add(MakeRow(leaf, KeyMap.LabelOf(i)));
             }
@@ -316,28 +316,62 @@ public partial class SelectorWindow : Window
             return;
         }
 
-        PART_PreviewTitle.Text = _vm.SelectedSlot!.Slot.Kind == SlotKind.Group
+        string title = _vm.SelectedSlot!.Slot.Kind == SlotKind.Group
             ? $"{_vm.SelectedSlot.Slot.Name} — {rep.Title}"
             : rep.Title;
-        try
+
+        // 最小化窗口截不到内容：PrintWindow 只返回黑图、GetClientRect 还会给出 0 尺寸。
+        // 与其让预览区一片黑，不如退回"大图标 + 已最小化"的提示图。
+        if (rep.IsMinimized)
         {
-            var bmp = _capture.Capture(rep.Hwnd, 0, 0);
-            if (bmp != null)
-            {
-                PART_PreviewImage.Source = bmp;
-                PART_PreviewPlaceholder.Visibility = Visibility.Collapsed;
-            }
-            else
-            {
-                PART_PreviewImage.Source = null;
-                PART_PreviewPlaceholder.Visibility = Visibility.Visible;
-            }
+            PART_PreviewTitle.Text = title + "（已最小化）";
+            PART_PreviewImage.Source = ComposeIconPreview(IconFor(rep), "窗口已最小化");
+            PART_PreviewPlaceholder.Visibility = Visibility.Collapsed;
+            return;
         }
-        catch
+
+        PART_PreviewTitle.Text = title;
+        BitmapSource? bmp = null;
+        try { bmp = _capture.Capture(rep.Hwnd, 0, 0); } catch { /* 下面统一兜底 */ }
+
+        if (bmp != null)
         {
-            PART_PreviewImage.Source = null;
-            PART_PreviewPlaceholder.Visibility = Visibility.Visible;
+            PART_PreviewImage.Source = bmp;
         }
+        else
+        {
+            // 截不到（句柄失效 / 尺寸为 0 等）也退回大图标，别留一片空白或黑。
+            PART_PreviewImage.Source = ComposeIconPreview(IconFor(rep), "无法预览此窗口");
+        }
+        PART_PreviewPlaceholder.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>合成一张占位预览图：深色底 + 居中大图标 + 一行提示文字。</summary>
+    private static BitmapSource ComposeIconPreview(BitmapSource? icon, string message)
+    {
+        const int W = 640, H = 480, IconSize = 128;
+        var visual = new DrawingVisual();
+        using (var dc = visual.RenderOpen())
+        {
+            dc.DrawRectangle(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x10, 0x10, 0x10)),
+                null, new Rect(0, 0, W, H));
+            if (icon != null)
+                dc.DrawImage(icon, new Rect((W - IconSize) / 2.0, (H - IconSize) / 2.0 - 24, IconSize, IconSize));
+
+            var text = new FormattedText(
+                message,
+                System.Globalization.CultureInfo.CurrentCulture,
+                System.Windows.FlowDirection.LeftToRight,
+                new Typeface("Microsoft YaHei UI"),
+                18,
+                new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x88, 0x88, 0x88)),
+                96);
+            dc.DrawText(text, new System.Windows.Point((W - text.Width) / 2, (H + IconSize) / 2.0));
+        }
+        var rtb = new RenderTargetBitmap(W, H, 96, 96, PixelFormats.Pbgra32);
+        rtb.Render(visual);
+        rtb.Freeze();
+        return rtb;
     }
 
     // ----------------------------------------------------------
@@ -1130,7 +1164,7 @@ public partial class SelectorWindow : Window
                 : null;
             if (i == memberIdx)
                 display = string.IsNullOrWhiteSpace(result) ? null : result;
-            newMembers.Add(new MemberSpec(wi.ProcessName, wi.Title) { DisplayName = display });
+            newMembers.Add(new MemberSpec(wi.ProcessName, wi.Title) { DisplayName = display, Hwnd = (long)wi.Hwnd });
         }
 
         var renamed = new ResolvedSlot

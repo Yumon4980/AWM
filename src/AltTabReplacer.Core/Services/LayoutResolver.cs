@@ -87,6 +87,7 @@ public sealed class ResolvedSlot
             {
                 DisplayName = string.IsNullOrWhiteSpace(name) ? null : name,
                 ExePath = m.ExePath,
+                Hwnd = m.Hwnd,
             }
         };
     }
@@ -189,6 +190,10 @@ public static class LayoutResolver
         var refs = def.Members;
         if (refs is not { Count: > 0 }) return null;   // 空组合不显示
 
+        // 只精确/兜底认领每个 ref 对应的窗口，**不吃同进程的其它窗口**。
+        // 之前的"吃掉同进程所有剩余"会让多个组合共享进程时第一个独占（用户报的 bug）。
+        // 现在 Members 一窗口一 ref，每个 ref 各取各的，remaining 自然被精确 Claim 清空，
+        // 也就不会被追加循环吐回——bug3（"组合后 B 又出现"）同样不复现。
         var windows = new List<WindowInfo>();
         foreach (var spec in refs)
         {
@@ -351,7 +356,7 @@ public static class LayoutResolver
             CustomName = effectiveCustom,
             Windows = new[] { w },
             Processes = new[] { w.ProcessName },
-            Members = new[] { new MemberSpec(w.ProcessName, w.Title) { DisplayName = display } },
+            Members = new[] { new MemberSpec(w.ProcessName, w.Title) { DisplayName = display, Hwnd = (long)w.Hwnd } },
         };
     }
 
@@ -359,42 +364,85 @@ public static class LayoutResolver
     //  认领 / 匹配
     // ============================================================
 
-    /// <summary>跨槽位预留精确匹配（含程序组的子项，递归）。</summary>
+    /// <summary>
+    /// 跨槽位预留匹配（含程序组的子项，递归）。分两轮，优先级从高到低：
+    ///   1) 窗口句柄提示——同一次运行内最可靠，标题变了也能精确找回原窗口；
+    ///   2) (进程, 标题) 精确——兜住首次运行 / 重启后句柄失效的情况。
+    /// 必须整体先做：否则某个槽位的兜底会抢走后面槽位本该精确匹配的窗口。
+    /// </summary>
     private static void ReserveExact(
         IEnumerable<SlotDefinition> defs, List<WindowInfo> remaining,
         Dictionary<MemberSpec, WindowInfo?> exact)
+    {
+        var specs = new List<MemberSpec>();
+        CollectSpecs(defs, specs);
+
+        foreach (var spec in specs)
+        {
+            var w = TakeHwnd(remaining, spec);
+            if (w != null) exact[spec] = w;
+        }
+
+        foreach (var spec in specs)
+        {
+            if (exact.ContainsKey(spec)) continue;
+            var w = TakeExact(remaining, spec);
+            if (w != null) exact[spec] = w;
+        }
+    }
+
+    private static void CollectSpecs(IEnumerable<SlotDefinition> defs, List<MemberSpec> specs)
     {
         foreach (var def in defs)
         {
             if (def.Children is { } children)
             {
-                ReserveExact(children, remaining, exact);
+                CollectSpecs(children, specs);
                 continue;
             }
             if (def.Members is { Count: > 0 })
-            {
-                foreach (var spec in def.Members)
-                {
-                    if (!exact.ContainsKey(spec))
-                        exact[spec] = TakeExact(remaining, spec);
-                }
-            }
+                specs.AddRange(def.Members);
         }
     }
 
-    /// <summary>先吃预留下的精确匹配，没有再按进程兜底。</summary>
+    /// <summary>先吃预留下的匹配，没有再按进程"挑最像的"兜底。命中的窗口会回填句柄提示。</summary>
     private static WindowInfo? Claim(
         MemberSpec spec, List<WindowInfo> remaining, Dictionary<MemberSpec, WindowInfo?> exact)
     {
-        if (exact.TryGetValue(spec, out var w) && w != null) return w;
-        return TakeAnyOfProcess(remaining, spec.Process);
+        WindowInfo? w = exact.TryGetValue(spec, out var e) && e != null
+            ? e
+            : TakeBestMatch(remaining, spec);
+
+        // 回填句柄提示：同一次运行的后续解析据此精确认领（标题再变也不丢）。
+        if (w != null && spec.Hwnd != (long)w.Hwnd) spec.Hwnd = (long)w.Hwnd;
+        return w;
+    }
+
+    /// <summary>按窗口句柄提示精确认领一个窗口（进程名必须也匹配，防止句柄被回收后张冠李戴）。</summary>
+    private static WindowInfo? TakeHwnd(List<WindowInfo> remaining, MemberSpec spec)
+    {
+        if (spec.Hwnd is not long h || h == 0) return null;
+        var hwnd = new IntPtr(h);
+        for (int i = 0; i < remaining.Count; i++)
+        {
+            if (remaining[i].Hwnd == hwnd
+                && string.Equals(remaining[i].ProcessName, spec.Process, StringComparison.OrdinalIgnoreCase))
+            {
+                var w = remaining[i];
+                remaining.RemoveAt(i);
+                return w;
+            }
+        }
+        return null;
     }
 
     /// <summary>按 (进程, 标题) 精确认领一个窗口，并从待分配里移除。</summary>
     private static WindowInfo? TakeExact(List<WindowInfo> remaining, MemberSpec spec)
     {
         if (string.IsNullOrEmpty(spec.Title)) return null;
-        for (int i = 0; i < remaining.Count; i++)
+        // 从最旧的一端扫：标题完全相同的多个窗口里优先认领更早存在的那个，
+        // 把新开的同标题窗口留给"多余窗口"处理，别让它挤掉原成员。
+        for (int i = remaining.Count - 1; i >= 0; i--)
         {
             if (string.Equals(remaining[i].ProcessName, spec.Process, StringComparison.OrdinalIgnoreCase)
                 && string.Equals(remaining[i].Title, spec.Title, StringComparison.OrdinalIgnoreCase))
@@ -408,21 +456,42 @@ public static class LayoutResolver
     }
 
     /// <summary>
-    /// 标题对不上时的兜底：认领该进程的任意一个窗口。
-    /// 标题会变（VS Code 换文件），没有兜底的话那个窗口就会掉出分组。
+    /// 标题对不上时的兜底：在该进程的剩余窗口里挑"最像"的那个，而不是无脑拿最近激活的。
+    ///
+    /// 之前直接取 z-order 最前（最近激活）的窗口，于是新开的同进程窗口会把组合里
+    /// 原来的窗口挤出去（用户报的 bug）。现在按标题的**最长公共后缀**打分
+    /// （VS Code / 浏览器换文件时后缀里的目录名不变），分数相同时取最旧的那个，
+    /// 让新窗口优先留在组合外面。
     /// </summary>
-    private static WindowInfo? TakeAnyOfProcess(List<WindowInfo> remaining, string process)
+    private static WindowInfo? TakeBestMatch(List<WindowInfo> remaining, MemberSpec spec)
     {
-        for (int i = 0; i < remaining.Count; i++)
+        int bestIndex = -1;
+        int bestScore = -1;
+        // 从尾部（最旧）往前扫：同分时先遇到的（更旧）胜出
+        for (int i = remaining.Count - 1; i >= 0; i--)
         {
-            if (string.Equals(remaining[i].ProcessName, process, StringComparison.OrdinalIgnoreCase))
-            {
-                var w = remaining[i];
-                remaining.RemoveAt(i);
-                return w;
-            }
+            if (!string.Equals(remaining[i].ProcessName, spec.Process, StringComparison.OrdinalIgnoreCase))
+                continue;
+            int score = string.IsNullOrEmpty(spec.Title)
+                ? 0
+                : CommonSuffixLength(spec.Title, remaining[i].Title);
+            if (score > bestScore) { bestScore = score; bestIndex = i; }
         }
-        return null;
+        if (bestIndex < 0) return null;
+        var w = remaining[bestIndex];
+        remaining.RemoveAt(bestIndex);
+        return w;
+    }
+
+    /// <summary>两个标题从末尾起相同的字符数（忽略大小写）。</summary>
+    private static int CommonSuffixLength(string a, string b)
+    {
+        int i = a.Length - 1, j = b.Length - 1, n = 0;
+        while (i >= 0 && j >= 0 && char.ToLowerInvariant(a[i]) == char.ToLowerInvariant(b[j]))
+        {
+            n++; i--; j--;
+        }
+        return n;
     }
 
     /// <summary>按窗口在原始 z-order 列表中的位置排序。</summary>
@@ -528,7 +597,7 @@ public static class LayoutResolver
                 display = s.Members[i].DisplayName;
             else if (s.Kind == SlotKind.Window)
                 display = s.CustomName;
-            yield return new MemberSpec(w.ProcessName, w.Title) { DisplayName = display };
+            yield return new MemberSpec(w.ProcessName, w.Title) { DisplayName = display, Hwnd = (long)w.Hwnd };
         }
     }
 
@@ -562,7 +631,7 @@ public static class LayoutResolver
                     Kind = SlotKind.Window,
                     Name = display,
                     Processes = new List<string> { w.ProcessName },
-                    Members = new List<MemberSpec> { new(w.ProcessName, w.Title) { DisplayName = display } },
+                    Members = new List<MemberSpec> { new(w.ProcessName, w.Title) { DisplayName = display, Hwnd = (long)w.Hwnd } },
                 });
             }
             return;

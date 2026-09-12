@@ -290,17 +290,7 @@ public partial class App : System.Windows.Application
         _trayIcon.DoubleClick += (_, __) => OnHotkeyPressed();
         Logger.Info("托盘图标已创建");
 
-        // 第一次启动若规则为空，提示用户配置
-        if (_ruleStore!.Current.Count == 0)
-        {
-            var result = System.Windows.MessageBox.Show(
-                "尚未配置任何排序规则。\n现在打开规则配置窗口吗？",
-                "AltTabReplacer", MessageBoxButton.YesNo, MessageBoxImage.Information);
-            if (result == MessageBoxResult.Yes)
-            {
-                LaunchConfigInNewProcess();
-            }
-        }
+        // 规则为空不再弹窗——托盘菜单里随时可以打开配置
     }
 
     /// <summary>取 exe 上嵌入的图标当托盘图标；失败退回系统默认图标。</summary>

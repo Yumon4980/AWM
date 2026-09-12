@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 
 namespace AltTabReplacer.Core.Models;
 
@@ -54,6 +55,19 @@ public sealed class MemberSpec
     /// 从运行中的窗口进程反查得到；窗口关掉后这条记录还在，所以能再拉起来。
     /// </summary>
     public string? ExePath { get; set; }
+
+    /// <summary>
+    /// 窗口句柄提示。**只在内存里用，不落盘**（<see cref="JsonIgnoreAttribute"/>）：
+    /// 重启后句柄会被系统回收重用，落盘的旧值可能张冠李戴，所以宁可重新推导。
+    ///
+    /// 为什么需要它：VS Code / 浏览器这类窗口标题会随文件、标签页变化，
+    /// 只按 (进程, 标题) 匹配的话标题一变就认不出原窗口，兜底逻辑会把**新开的**
+    /// 同进程窗口抓进组合、把原成员挤出去。有了句柄提示，同一次运行内可以精确找回
+    /// 原窗口，新窗口就不会被误吸进组合。首次解析 / 重启后没有提示时，
+    /// 退回 (进程, 标题) 与"最长公共后缀"匹配，也能正确落位。
+    /// </summary>
+    [JsonIgnore]
+    public long? Hwnd { get; set; }
 
     public MemberSpec() { }
     public MemberSpec(string process, string? title)

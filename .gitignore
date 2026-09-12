@@ -1,6 +1,7 @@
 # ---- .NET 编译产物 ----
 bin/
 obj/
+/publish/
 *.user
 *.suo
 *.userprefs
