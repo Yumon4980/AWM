@@ -57,6 +57,12 @@ public sealed class MemberSpec
     public string? ExePath { get; set; }
 
     /// <summary>
+    /// 锁定：组内这个成员固定占住当前键位，组内排序 / 移出 / 解散时都不会动它。
+    /// 仅对自动折叠组生效——手工组的子项锁定走 <see cref="SlotDefinition.Locked"/> / <see cref="SlotDefinition.Position"/>。
+    /// </summary>
+    public bool Locked { get; set; }
+
+    /// <summary>
     /// 窗口句柄提示。**只在内存里用，不落盘**（<see cref="JsonIgnoreAttribute"/>）：
     /// 重启后句柄会被系统回收重用，落盘的旧值可能张冠李戴，所以宁可重新推导。
     ///

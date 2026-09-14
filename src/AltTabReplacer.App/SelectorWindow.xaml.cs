@@ -283,13 +283,17 @@ public partial class SelectorWindow : Window
                 string? custom = group.Members is { Count: > 0 } && i < group.Members.Count
                     ? group.Members[i].DisplayName
                     : null;
+                // 自动折叠组的成员锁定存放在 MemberSpec.Locked 上（Children==null 时无法挂到子槽位）。
+                bool locked = group.Members is { Count: > 0 } && i < group.Members.Count
+                    && group.Members[i].Locked;
                 var leaf = new ResolvedSlot
                 {
                     Kind = SlotKind.Window,
                     Name = string.IsNullOrWhiteSpace(custom) ? w.Title : custom!,
                     Windows = new[] { w },
                     Processes = new[] { w.ProcessName },
-                    Members = new[] { new MemberSpec(w.ProcessName, w.Title) { DisplayName = custom, Hwnd = (long)w.Hwnd } },
+                    Members = new[] { new MemberSpec(w.ProcessName, w.Title) { DisplayName = custom, Hwnd = (long)w.Hwnd, Locked = locked } },
+                    Locked = locked,
                 };
                 _vm.Slots.Add(MakeRow(leaf, KeyMap.LabelOf(i)));
             }
@@ -1189,6 +1193,12 @@ public partial class SelectorWindow : Window
         if (drop.Mode == DropMode.OutOfGroup)
         {
             if (_openGroup == null || _openGroupIndex < 0) return;
+            // 锁定的成员不能被移出，与一级"锁定槽位不能拖动"对齐
+            if (source >= 0 && source < _vm.Slots.Count && _vm.Slots[source].Slot.Locked)
+            {
+                Logger.Info($"组内成员已锁定，不能移出: {_vm.Slots[source].Name}");
+                return;
+            }
 
             List<ResolvedSlot>? result;
             if (_openGroup.Children != null)
@@ -1216,10 +1226,21 @@ public partial class SelectorWindow : Window
             if (_openGroup == null || _openGroupIndex < 0) return;
             if (source < 0 || source >= _gridCount) return;
             if (_gridCount <= 1) return;
+            // 锁定的成员不能作为拖动源；目标若被锁定也不能被并入（与一级行为对齐）
+            if (_vm.Slots[source].Slot.Locked)
+            {
+                Logger.Info($"组内成员已锁定，不能拖动: {_vm.Slots[source].Name}");
+                return;
+            }
 
             if (drop.Mode == DropMode.IntoSlot)
             {
                 if (drop.Index == source) return;
+                if (drop.Index >= 0 && drop.Index < _vm.Slots.Count && _vm.Slots[drop.Index].Slot.Locked)
+                {
+                    Logger.Info($"锁定的成员不能被并入: {_vm.Slots[drop.Index].Name}");
+                    return;
+                }
                 var combined = SlotEditor.CombineWithinGroup(
                     _topSlots, _openGroupIndex, source, drop.Index, ResolveExePath);
                 if (combined == null)
@@ -1622,6 +1643,13 @@ public partial class SelectorWindow : Window
         int pos = CurrentIndexOf(row);
         if (pos < 0 || pos >= KeyMap.Size) return;      // 只有网格里的槽位能锁定
 
+        // 二级：组内成员走自己的锁定通道（手工组 → Children[i]；自动折叠组 → Members[i]）
+        if (_vm.Level == SelectorLevel.InGroup && _openGroup != null && _openGroupIndex >= 0)
+        {
+            ToggleChildLock(row, pos);
+            return;
+        }
+
         var slots = _topSlots.ToList();
         int idx = slots.IndexOf(row.Slot);
         if (idx < 0) return;
@@ -1631,6 +1659,24 @@ public partial class SelectorWindow : Window
         slots[idx] = slots[idx].WithLock(locked, pos);
         Logger.Info($"{(locked ? "锁定" : "解锁")}: {row.Name} @ {KeyMap.LabelOf(pos)}");
         CommitLayout(slots, idx, compact: false);
+        Activate();
+        Focus();
+    }
+
+    /// <summary>二级锁定切换：调 <see cref="SlotEditor.SetChildLock"/>，并留在二级。</summary>
+    private void ToggleChildLock(SlotViewModel row, int pos)
+    {
+        if (_openGroup == null || _openGroupIndex < 0) return;
+
+        int childIdx = _vm.Slots.IndexOf(row);
+        if (childIdx < 0) return;
+
+        bool locked = !row.Slot.Locked;
+        var result = SlotEditor.SetChildLock(_topSlots, _openGroupIndex, childIdx, locked, pos);
+        if (result == null) return;
+
+        Logger.Info($"二级{(locked ? "锁定" : "解锁")}: {row.Name} @ {KeyMap.LabelOf(pos)}");
+        CommitGroupReorder(result, _openGroupIndex, childIdx);
         Activate();
         Focus();
     }
@@ -1921,6 +1967,12 @@ public partial class SelectorWindow : Window
         if (_vm.Level != SelectorLevel.InGroup || _openGroup == null || _openGroupIndex < 0) return;
         int idx = _vm.Slots.IndexOf(memberRow);
         if (idx < 0) return;
+        // 锁定的成员不能被移出（一级"锁定槽位不能拖动"的对齐）
+        if (memberRow.Slot.Locked)
+        {
+            Logger.Info($"已锁定的成员不能移出: {memberRow.Name}");
+            return;
+        }
 
         List<ResolvedSlot>? result;
         if (_openGroup.Children != null)

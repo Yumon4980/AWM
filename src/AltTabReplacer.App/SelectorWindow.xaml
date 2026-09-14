@@ -115,7 +115,9 @@
                         <Border Background="Transparent" Padding="3,1" Margin="1" Cursor="Hand"
                                 ToolTip="锁定：固定占住这个键位，排序/删除都不会移动它"
                                 PreviewMouseLeftButtonUp="OnLockToggleClick">
-                            <TextBlock Text="{Binding LockGlyph}" FontSize="11"/>
+                            <TextBlock Text="{Binding LockGlyph}"
+                                       FontFamily="Segoe MDL2 Assets" FontSize="12"
+                                       Foreground="White"/>
                         </Border>
                     </StackPanel>
                 </Grid>

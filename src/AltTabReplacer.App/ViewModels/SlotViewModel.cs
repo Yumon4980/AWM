@@ -106,8 +106,8 @@ public sealed class SlotViewModel : INotifyPropertyChanged
     /// <summary>空占位格：只为撑满 4×4 网格、保留键位空间关系，不可选中 / 触发。</summary>
     public bool IsEmpty { get; }
 
-    /// <summary>锁定图标：🔒 锁定 / 🔓 未锁定（空格不显示）。</summary>
-    public string LockGlyph => IsEmpty ? "" : (Slot.Locked ? "🔒" : "🔓");
+    /// <summary>锁定图标（Segoe MDL2 Assets 字形）：E72E = 锁，E785 = 未锁。空格不显示。</summary>
+    public string LockGlyph => IsEmpty ? "" : (Slot.Locked ? "\uE72E" : "\uE785");
 
     /// <summary>创建一个空占位格（只有键标）。</summary>
     public static SlotViewModel Empty(string keyLabel) => new(keyLabel);

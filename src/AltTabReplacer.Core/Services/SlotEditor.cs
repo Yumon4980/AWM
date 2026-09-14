@@ -397,6 +397,61 @@ public static class SlotEditor
     }
 
     /// <summary>
+    /// 二级：切换组内成员的锁定状态。
+    ///   - 手工组 → 更新 Children[childIndex] 的 Locked / Position；
+    ///   - 自动折叠组 → 更新 Members[childIndex].Locked（成员位置由列表顺序决定）。
+    /// 锁定 / 解锁都保留当前键位，组内其它成员不会因此被压缩。
+    /// </summary>
+    public static List<ResolvedSlot>? SetChildLock(
+        IReadOnlyList<ResolvedSlot> slots, int groupIndex, int childIndex,
+        bool locked, int? position)
+    {
+        if (groupIndex < 0 || groupIndex >= slots.Count) return null;
+        var group = slots[groupIndex];
+        if (group.Kind != SlotKind.Group) return null;
+
+        // 手工组：直接改 Children[childIndex]
+        if (group.Children != null)
+        {
+            if (childIndex < 0 || childIndex >= group.Children.Count) return null;
+            var children = group.Children.ToList();
+            children[childIndex] = children[childIndex].WithLock(locked, position);
+            var list = slots.ToList();
+            list[groupIndex] = BuildGroup(group, children);
+            return list;
+        }
+
+        // 自动折叠组：按 Members 索引改 Locked
+        if (group.Members == null || childIndex < 0 || childIndex >= group.Members.Count) return null;
+
+        var members = new List<MemberSpec>(group.Members.Count);
+        for (int i = 0; i < group.Members.Count; i++)
+        {
+            var m = group.Members[i];
+            if (i == childIndex)
+            {
+                members.Add(new MemberSpec(m.Process, m.Title)
+                {
+                    DisplayName = m.DisplayName,
+                    ExePath = m.ExePath,
+                    Hwnd = m.Hwnd,
+                    Locked = locked,
+                });
+            }
+            else
+            {
+                members.Add(m);
+            }
+        }
+
+        var list2 = slots.ToList();
+        list2[groupIndex] = MakeSlot(group.Name, group.CustomName, group.Windows.ToList(),
+            group.Processes.ToList(), group.MemberOrder?.ToList(), members,
+            group.Locked, group.Position);
+        return list2;
+    }
+
+    /// <summary>
     /// 把**单个窗口**从自动折叠组里拆出来（按窗口，不按进程）。
     /// 手工组请用 <see cref="MoveChildOutOfGroup"/>。
     /// </summary>
