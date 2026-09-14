@@ -273,8 +273,8 @@ public partial class App : System.Windows.Application
     {
         var menu = new WinForms.ContextMenuStrip();
         menu.Items.Add($"显示选择器 ({HotkeyLabel})", null, (_, __) => OnHotkeyPressed());
-        menu.Items.Add("重置分组与顺序", null, (_, __) => ResetLayout());
-        menu.Items.Add("打开规则配置", null, (_, __) => LaunchConfigInNewProcess());
+        // menu.Items.Add("重置分组与顺序", null, (_, __) => ResetLayout());#已屏蔽，后续考虑加不加入
+        // menu.Items.Add("打开规则配置", null, (_, __) => LaunchConfigInNewProcess());#已屏蔽，后续考虑加不加入
         menu.Items.Add(new WinForms.ToolStripSeparator());
         menu.Items.Add("退出", null, (_, __) =>
         {
