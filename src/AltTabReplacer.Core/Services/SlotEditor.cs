@@ -397,14 +397,116 @@ public static class SlotEditor
     }
 
     /// <summary>
+    /// 锁定时记录"未开则启动"的可执行路径：
+    ///   程序 / 程序组合 → 补全 Members 里缺失的 ExePath；
+    ///   手工程序组 → 递归补全每个子项；
+    ///   自动折叠的程序组 → 写 LaunchPath（整组兜底，窗口全关后一键拉起）。
+    /// explorer 窗口另走 <paramref name="explorerPath"/>（Shell COM）拿真实浏览路径，
+    /// 写进 LaunchArgs——窗口标题会被 Windows 截断，不可靠。
+    /// 只补缺失的，不覆盖已有值。锁定动作本身由调用方先做（<see cref="ResolvedSlot.WithLock"/>）。
+    /// </summary>
+    public static ResolvedSlot WithLaunchInfo(ResolvedSlot slot, Func<WindowInfo, string?> exePath,
+        Func<WindowInfo, string?>? explorerPath = null)
+    {
+        if (slot.Kind == SlotKind.Group && slot.Children != null)
+        {
+            var children = slot.Children.Select(c => WithLaunchInfo(c, exePath, explorerPath)).ToList();
+            return slot.WithChildren(children);
+        }
+
+        string? launch = slot.LaunchPath;
+        string? launchArgs = slot.LaunchArgs;
+        if (slot.Kind == SlotKind.Group && string.IsNullOrEmpty(launch)
+            && slot.Windows is { Count: > 0 })
+        {
+            launch = exePath(slot.Windows[0]);
+            // 自动折叠的 explorer 组：整组兜底参数取第一个成员的真实路径
+            if (string.IsNullOrEmpty(launchArgs) && explorerPath != null
+                && LayoutResolver.IsExplorer(slot.Windows[0].ProcessName))
+            {
+                launchArgs = explorerPath(slot.Windows[0]);
+            }
+        }
+
+        var members = slot.Members?.ToList();
+        if (members != null) FillSpecExe(members, slot.Windows, exePath);
+        if (members != null && explorerPath != null) FillSpecArgs(members, slot.Windows, explorerPath);
+
+        return slot.WithLaunch(launch, members, launchArgs);
+    }
+
+    /// <summary>给缺失 LaunchArgs 的 explorer 成员补上真实浏览路径（Shell COM）。</summary>
+    private static void FillSpecArgs(
+        List<MemberSpec> specs, IReadOnlyList<WindowInfo> windows, Func<WindowInfo, string?> explorerPath)
+    {
+        for (int i = 0; i < specs.Count; i++)
+        {
+            if (!string.IsNullOrEmpty(specs[i].LaunchArgs)) continue;
+            if (!LayoutResolver.IsExplorer(specs[i].Process)) continue;
+            WindowInfo? w = null;
+            foreach (var cand in windows)
+            {
+                if (cand.Hwnd != IntPtr.Zero
+                    && string.Equals(cand.ProcessName, specs[i].Process, StringComparison.OrdinalIgnoreCase))
+                {
+                    w = cand;
+                    break;
+                }
+            }
+            if (w == null) continue;
+            string? p = explorerPath(w);
+            if (string.IsNullOrEmpty(p)) continue;
+            specs[i] = CopySpec(specs[i], args: p);
+        }
+    }
+
+    /// <summary>给缺失 ExePath 的成员补上路径：按进程名找打开中的窗口反查，查不到留空。</summary>
+    private static void FillSpecExe(
+        List<MemberSpec> specs, IReadOnlyList<WindowInfo> windows, Func<WindowInfo, string?> exePath)
+    {
+        for (int i = 0; i < specs.Count; i++)
+        {
+            if (!string.IsNullOrEmpty(specs[i].ExePath)) continue;
+            WindowInfo? w = null;
+            foreach (var cand in windows)
+            {
+                if (cand.Hwnd != IntPtr.Zero
+                    && string.Equals(cand.ProcessName, specs[i].Process, StringComparison.OrdinalIgnoreCase))
+                {
+                    w = cand;
+                    break;
+                }
+            }
+            if (w == null) continue;
+            string? p = exePath(w);
+            if (string.IsNullOrEmpty(p)) continue;
+            specs[i] = CopySpec(specs[i], exe: p);
+        }
+    }
+
+    /// <summary>成员描述的副本（MemberSpec 会被持久化文档共享，不能就地改）。</summary>
+    private static MemberSpec CopySpec(MemberSpec m, string? exe = null, string? args = null, bool? locked = null) =>
+        new(m.Process, m.Title)
+        {
+            DisplayName = m.DisplayName,
+            ExePath = exe ?? m.ExePath,
+            LaunchArgs = args ?? m.LaunchArgs,
+            Hwnd = m.Hwnd,
+            Locked = locked ?? m.Locked,
+        };
+
+    /// <summary>
     /// 二级：切换组内成员的锁定状态。
     ///   - 手工组 → 更新 Children[childIndex] 的 Locked / Position；
     ///   - 自动折叠组 → 更新 Members[childIndex].Locked（成员位置由列表顺序决定）。
     /// 锁定 / 解锁都保留当前键位，组内其它成员不会因此被压缩。
     /// </summary>
+    /// <param name="exePath">锁定时顺带记录的"未开则启动"路径；null = 不补记。</param>
+    /// <param name="explorerPath">explorer 窗口真实路径解析（Shell COM）；null = 不补记。</param>
     public static List<ResolvedSlot>? SetChildLock(
         IReadOnlyList<ResolvedSlot> slots, int groupIndex, int childIndex,
-        bool locked, int? position)
+        bool locked, int? position, string? exePath = null,
+        Func<WindowInfo, string?>? explorerPath = null)
     {
         if (groupIndex < 0 || groupIndex >= slots.Count) return null;
         var group = slots[groupIndex];
@@ -415,7 +517,24 @@ public static class SlotEditor
         {
             if (childIndex < 0 || childIndex >= group.Children.Count) return null;
             var children = group.Children.ToList();
-            children[childIndex] = children[childIndex].WithLock(locked, position);
+            var child = children[childIndex].WithLock(locked, position);
+            if (locked && child.Members is { Count: > 0 })
+            {
+                var specs = child.Members.ToList();
+                for (int i = 0; i < specs.Count; i++)
+                {
+                    bool isExplorer = LayoutResolver.IsExplorer(specs[i].Process);
+                    if (!string.IsNullOrEmpty(specs[i].ExePath) && !isExplorer) continue;
+                    specs[i] = CopySpec(specs[i],
+                        exe: specs[i].ExePath ?? exePath,
+                        args: isExplorer && string.IsNullOrEmpty(specs[i].LaunchArgs)
+                            ? explorerPath?.Invoke(child.Windows is { Count: > 0 } ? child.Windows[0] : default!)
+                            : null);
+                    if (!isExplorer) break;      // 只补第一个缺失的（程序 = 唯一成员）
+                }
+                child = child.WithLaunch(child.LaunchPath, specs);
+            }
+            children[childIndex] = child;
             var list = slots.ToList();
             list[groupIndex] = BuildGroup(group, children);
             return list;
@@ -428,20 +547,16 @@ public static class SlotEditor
         for (int i = 0; i < group.Members.Count; i++)
         {
             var m = group.Members[i];
-            if (i == childIndex)
-            {
-                members.Add(new MemberSpec(m.Process, m.Title)
-                {
-                    DisplayName = m.DisplayName,
-                    ExePath = m.ExePath,
-                    Hwnd = m.Hwnd,
-                    Locked = locked,
-                });
-            }
-            else
-            {
-                members.Add(m);
-            }
+            members.Add(i == childIndex
+                ? CopySpec(m,
+                    exe: locked ? m.ExePath ?? exePath : null,
+                    args: locked && string.IsNullOrEmpty(m.LaunchArgs)
+                        && LayoutResolver.IsExplorer(m.Process)
+                        && group.Windows is { Count: > 0 } && childIndex < group.Windows.Count
+                        ? explorerPath?.Invoke(group.Windows[childIndex])
+                        : null,
+                    locked: locked)
+                : m);
         }
 
         var list2 = slots.ToList();

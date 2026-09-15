@@ -40,26 +40,67 @@ public sealed class WindowActivator
         {
             if (matchedProcs.Contains(spec.Process)) continue;
             if (!launchedProcs.Add(spec.Process)) continue;
-            if (!string.IsNullOrEmpty(spec.ExePath)) Launch(spec.ExePath!);
+            if (!string.IsNullOrEmpty(spec.ExePath)) Launch(spec.ExePath!, spec.LaunchArgs);
             else Logger.Warn($"程序组合成员 {spec.Process} 没有可执行路径，无法启动");
+        }
+
+        // 全体成员都没开、又一条可执行路径都没启动时，退回整槽位的兜底路径
+        if (combo.Windows.Count == 0 && launchedProcs.Count == 0 && !string.IsNullOrEmpty(combo.LaunchPath))
+            Launch(combo.LaunchPath, combo.LaunchArgs);
+
+        // explorer 路径窗口特别提示：标题被 Windows 截断（长路径带 "..."）时
+        // 程序组合 / 槽位的 LaunchArgs 都为 null，explorer 启动后会开"主页"。
+        // 需要在右键菜单里手动设置启动参数。
+        if (launchedProcs.Count > 0 && combo.LaunchPath == null
+            && combo.Members?.Any(m => string.Equals(m.Process, "explorer", StringComparison.OrdinalIgnoreCase)
+                && string.IsNullOrEmpty(m.LaunchArgs)) == true)
+        {
+            Logger.Info("explorer 成员没有记录精确路径（长路径会被 Windows 截断），可能启动为\"主页\"。右键槽位可手动设置启动参数。");
         }
     }
 
+    /// <summary>
+    /// 重新启动一个"窗口已全部关闭"的锁定槽位：按成员记录的可执行路径逐个启动
+    /// （同进程只启动一次）。成员路径全都缺失时退回整槽位的兜底路径
+    /// <see cref="ResolvedSlot.LaunchPath"/>。
+    /// </summary>
+    public void RelaunchClosed(ResolvedSlot slot)
+    {
+        var launched = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (slot.Members is { Count: > 0 })
+        {
+            foreach (var spec in slot.Members)
+            {
+                if (string.IsNullOrEmpty(spec.ExePath)) continue;
+                if (!launched.Add(spec.Process)) continue;
+                Launch(spec.ExePath!, spec.LaunchArgs);
+            }
+        }
+
+        if (launched.Count == 0 && !string.IsNullOrEmpty(slot.LaunchPath))
+            Launch(slot.LaunchPath, slot.LaunchArgs);
+
+        if (launched.Count == 0 && string.IsNullOrEmpty(slot.LaunchPath))
+            Logger.Warn($"重新启动失败: {slot.Name} 没有记录可执行路径（解锁再重新锁定可补记）");
+    }
+
     /// <summary>用 ShellExecute 启动一个可执行文件（走默认关联 / 工作目录）。</summary>
-    public static void Launch(string exePath)
+    public static void Launch(string exePath, string? args = null)
     {
         try
         {
+            // 含空格的路径或 args 自动加引号；简单替换成 Arguments 字段更安全
             Process.Start(new ProcessStartInfo
             {
                 FileName = exePath,
+                Arguments = args ?? "",
                 UseShellExecute = true,
             });
-            Logger.Info($"启动程序: {exePath}");
+            Logger.Info($"启动程序: {exePath}{(string.IsNullOrEmpty(args) ? "" : " " + args)}");
         }
         catch (Exception ex)
         {
-            Logger.Error($"启动失败 {exePath}: {ex.Message}");
+            Logger.Error($"启动失败 {exePath} {args}: {ex.Message}");
         }
     }
 

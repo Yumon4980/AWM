@@ -57,6 +57,12 @@ public sealed class MemberSpec
     public string? ExePath { get; set; }
 
     /// <summary>
+    /// 启动时附加的命令行参数。
+    /// 主要用于 explorer 路径窗口：同进程多窗口，光靠 exe 只能开"主页"，传路径才能精确复现。
+    /// </summary>
+    public string? LaunchArgs { get; set; }
+
+    /// <summary>
     /// 锁定：组内这个成员固定占住当前键位，组内排序 / 移出 / 解散时都不会动它。
     /// 仅对自动折叠组生效——手工组的子项锁定走 <see cref="SlotDefinition.Locked"/> / <see cref="SlotDefinition.Position"/>。
     /// </summary>
@@ -120,6 +126,20 @@ public sealed class SlotDefinition
     /// 层级严格两级：子项里不会再出现程序组。
     /// </summary>
     public List<SlotDefinition>? Children { get; set; }
+
+    /// <summary>
+    /// 锁定槽位的启动兜底：窗口全关后按这个键位时用它重新启动程序。
+    /// 只对没有 <see cref="Members"/> 的槽位（按进程语义的窗口 / 自动折叠组）有意义；
+    /// 有 Members 的槽位启动路径记在每个 <see cref="MemberSpec.ExePath"/> 上。
+    /// </summary>
+    public string? ExePath { get; set; }
+
+    /// <summary>
+    /// 启动时附加的命令行参数。
+    /// 主要用于"文件夹窗口"（explorer.exe）：每个 explorer 窗口对应一条路径，
+    /// 只启动 explorer.exe 会开"主页"，必须传路径才能精确复现用户之前打开的那一窗口。
+    /// </summary>
+    public string? LaunchArgs { get; set; }
 
     /// <summary>
     /// 旧字段：解散单进程组时置位。现已由 <see cref="Members"/> 取代，

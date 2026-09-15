@@ -54,6 +54,9 @@ public partial class SelectorWindow : Window
 
     private readonly Dictionary<IntPtr, BitmapSource?> _iconCache = new();
 
+    /// <summary>已关闭成员的 exe 图标缓存（按路径）。程序没开时网格/预览都用它。</summary>
+    private readonly Dictionary<string, BitmapSource?> _exeIconCache = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>建程序组合时反查程序的可执行路径（"未开则启动"要用）。</summary>
     private readonly ProcessPathResolver _pathResolver = new();
 
@@ -252,11 +255,24 @@ public partial class SelectorWindow : Window
 
     private SlotViewModel MakeRow(ResolvedSlot slot, string label)
     {
-        BitmapSource? icon = slot.Count > 0 ? IconFor(slot.Windows[0]) : null;
+        BitmapSource? icon = slot.Count > 0 ? IconForMember(slot, 0) : null;
         var icons = (slot.Kind == SlotKind.Group || slot.Kind == SlotKind.Combination)
-            ? slot.Windows.Take(4).Select(IconFor).ToList()
+            ? slot.Windows.Take(4).Select((_, i) => IconForMember(slot, i)).ToList()
             : new List<BitmapSource?>();
         return new SlotViewModel(slot, label, icon, icons);
+    }
+
+    /// <summary>
+    /// 槽位第 i 个成员的图标。已关闭的成员（Hwnd=0，锁定槽位的"未运行"占位）
+    /// 没有活窗口可取，从锁定时记录的可执行路径扒 exe 图标。
+    /// </summary>
+    private BitmapSource? IconForMember(ResolvedSlot slot, int i)
+    {
+        var w = slot.Windows[i];
+        if (w.Hwnd != IntPtr.Zero) return IconFor(w);
+        string? exe = slot.Members is { Count: > 0 } && i < slot.Members.Count
+            ? slot.Members[i].ExePath : null;
+        return IconForExe(exe ?? slot.LaunchPath);
     }
 
     /// <summary>
@@ -292,7 +308,14 @@ public partial class SelectorWindow : Window
                     Name = string.IsNullOrWhiteSpace(custom) ? w.Title : custom!,
                     Windows = new[] { w },
                     Processes = new[] { w.ProcessName },
-                    Members = new[] { new MemberSpec(w.ProcessName, w.Title) { DisplayName = custom, Hwnd = (long)w.Hwnd, Locked = locked } },
+                    Members = new[] { new MemberSpec(w.ProcessName, w.Title)
+                    {
+                        DisplayName = custom,
+                        ExePath = group.Members is { Count: > 0 } && i < group.Members.Count
+                            ? group.Members[i].ExePath : null,
+                        Hwnd = (long)w.Hwnd,
+                        Locked = locked,
+                    } },
                     Locked = locked,
                 };
                 _vm.Slots.Add(MakeRow(leaf, KeyMap.LabelOf(i)));
@@ -327,6 +350,26 @@ public partial class SelectorWindow : Window
         }
 
         _iconCache[w.Hwnd] = icon;
+        return icon;
+    }
+
+    /// <summary>从可执行文件路径提取图标（未运行的锁定槽位用）。文件不存在 / 无图标返回 null。</summary>
+    private BitmapSource? IconForExe(string? exePath)
+    {
+        if (string.IsNullOrEmpty(exePath)) return null;
+        if (_exeIconCache.TryGetValue(exePath, out var cached)) return cached;
+
+        BitmapSource? icon = null;
+        try
+        {
+            using var ico = System.Drawing.Icon.ExtractAssociatedIcon(exePath);
+            if (ico != null) icon = HIconToBitmapSource(ico.Handle);
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"提取程序图标失败 ({exePath}): {ex.Message}");
+        }
+        _exeIconCache[exePath] = icon;
         return icon;
     }
 
@@ -465,6 +508,16 @@ public partial class SelectorWindow : Window
         string title = _vm.SelectedSlot!.Slot.Kind == SlotKind.Group
             ? $"{_vm.SelectedSlot.Slot.Name} — {rep.Title}"
             : rep.Title;
+
+        // 锁定槽位的"未运行"占位（Hwnd=0）：截不到内容，显示 exe 图标 + 重启提示
+        if (rep.Hwnd == IntPtr.Zero)
+        {
+            PART_PreviewTitle.Text = title + "（未运行）";
+            PART_PreviewImage.Source = ComposeIconPreview(
+                IconForMember(_vm.SelectedSlot.Slot, 0), "程序未运行 — 按 Enter 重新启动");
+            PART_PreviewPlaceholder.Visibility = Visibility.Collapsed;
+            return;
+        }
 
         // 最小化窗口截不到内容：PrintWindow 只返回黑图、GetClientRect 还会给出 0 尺寸。
         // 与其让预览区一片黑，不如退回"大图标 + 已最小化"的提示图。
@@ -845,6 +898,19 @@ public partial class SelectorWindow : Window
     private void ActivateAndClose(ResolvedSlot slot)
     {
         var target = slot.SingleWindow;
+
+        // 锁定槽位的窗口已全部关闭（Hwnd=0 的"未运行"占位）：用记录的可执行路径重新启动
+        if (target != null && target.Hwnd == IntPtr.Zero)
+        {
+            if (_closing) return;
+            _closing = true;
+            Logger.Info($"重新启动已关闭的程序: {slot.Name}");
+            try { _activator.RelaunchClosed(slot); }
+            catch (Exception ex) { Logger.Error($"重新启动失败: {ex.Message}"); }
+            Close();
+            return;
+        }
+
         if (target == null) { Cancel(); return; }
         if (_closing) return;
 
@@ -1496,6 +1562,15 @@ public partial class SelectorWindow : Window
         LayoutChanged?.Invoke(_topSlots);
     }
 
+    /// <summary>UI 行在一级列表 _topSlots 里的索引（按"行当前所在位置"反查）；找不到返回 -1。
+    /// 走"行在网格 / 溢出列表的位置 → 一级索引"的路径，不依赖 row.Slot 这个可能已过期的引用。</summary>
+    private int TopIndexOf(SlotViewModel row)
+    {
+        int full = CurrentIndexOf(row);
+        if (full < 0) return -1;
+        return TopIndexOfFull(full);
+    }
+
     /// <summary>槽位在一级列表 _topSlots 里的索引（按引用）；找不到返回 -1。</summary>
     private int TopIndexOf(ResolvedSlot slot)
     {
@@ -1651,12 +1726,30 @@ public partial class SelectorWindow : Window
         }
 
         var slots = _topSlots.ToList();
-        int idx = slots.IndexOf(row.Slot);
+        int idx = TopIndexOf(row);
         if (idx < 0) return;
 
         bool locked = !slots[idx].Locked;
+
+        // 已关闭的占位槽位解锁 = 它的历史使命结束，立即从布局里移除（要落盘，否则下次唤起又冒出来）
+        if (!locked && slots[idx].IsClosed)
+        {
+            RemoveGhostRow(row);
+            Activate();
+            Focus();
+            return;
+        }
+
         // 锁定 / 解锁都保留当前位置；且不让其它未锁定槽位被压缩（compact:false）
-        slots[idx] = slots[idx].WithLock(locked, pos);
+        var updated = slots[idx].WithLock(locked, pos);
+        if (locked)
+        {
+            // 记录"未开则启动"的可执行路径：窗口以后关掉，按这个键位还能拉起来。
+            // explorer 窗口另走 Shell COM 拿真实浏览路径（标题会被 Windows 截断，不可靠）。
+            updated = SlotEditor.WithLaunchInfo(updated, ResolveExePath,
+                w => ExplorerPathResolver.GetPath(w.Hwnd));
+        }
+        slots[idx] = updated;
         Logger.Info($"{(locked ? "锁定" : "解锁")}: {row.Name} @ {KeyMap.LabelOf(pos)}");
         CommitLayout(slots, idx, compact: false);
         Activate();
@@ -1672,7 +1765,22 @@ public partial class SelectorWindow : Window
         if (childIdx < 0) return;
 
         bool locked = !row.Slot.Locked;
-        var result = SlotEditor.SetChildLock(_topSlots, _openGroupIndex, childIdx, locked, pos);
+
+        // 已关闭的占位成员解锁 = 直接从组里移除
+        if (!locked && row.Slot.IsClosed)
+        {
+            RemoveGhostRow(row);
+            Activate();
+            Focus();
+            return;
+        }
+
+        // 锁定时顺带记录可执行路径：成员窗口以后关掉，按键还能重新启动
+        string? exePath = locked && row.Slot.Windows is { Count: > 0 }
+            ? ResolveExePath(row.Slot.Windows[0])
+            : null;
+        var result = SlotEditor.SetChildLock(_topSlots, _openGroupIndex, childIdx, locked, pos,
+            exePath, w => ExplorerPathResolver.GetPath(w.Hwnd));
         if (result == null) return;
 
         Logger.Info($"二级{(locked ? "锁定" : "解锁")}: {row.Name} @ {KeyMap.LabelOf(pos)}");
@@ -1894,23 +2002,133 @@ public partial class SelectorWindow : Window
     /// <summary>
     /// 关闭这个槽位代表的那个窗口（WM_CLOSE，目标程序自己处理）。
     /// **不关闭选择器**——用户可以继续在界面里操作、连续关掉多个程序。
-    /// 只把这一行从当前视图里去掉；下次唤起时 layout 会按当前实际窗口重新解析。
+    ///   未锁定槽位：立即从视图消失（下次唤起时按实际窗口重新解析，同样不会再出现）；
+    ///   锁定槽位：**不消失**，立即就地转成"未运行"占位，之后按这个键位还能重新启动。
+    /// "关闭程序"点在已是"未运行"的占位上 = 移除占位。
     /// </summary>
     private void CloseWindowFromSlot(SlotViewModel row)
     {
         var w = row.Slot.SingleWindow;
         if (w == null || w.Hwnd == IntPtr.Zero)
         {
-            Logger.Warn($"关闭程序: {row.Name} 没有可关闭的窗口句柄");
+            // 占位槽位没有可关闭的窗口：右键"关闭程序"= 移除占位（解锁也能达到同样效果）
+            Logger.Info($"移除占位槽位: {row.Name}");
+            RemoveGhostRow(row);
+            Activate();
+            Focus();
             return;
         }
         Logger.Info($"关闭程序: {row.Name} (hwnd=0x{w.Hwnd:X})");
         PostMessage(w.Hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
 
-        RemoveRowFromView(row);
+        if (row.Slot.Locked) MarkRowClosed(row, w);
+        else RemoveRowFromView(row);
         Activate();
         Focus();
     }
+
+    /// <summary>
+    /// 锁定槽位的窗口被关闭后**立即**就地转成"未运行"占位（不落盘——布局定义没变，
+    /// 下次唤起时 LayoutResolver 会从锁定定义里解析出同样的占位）。
+    /// 一级和二级都支持；全部按行索引 / 实时引用定位，不依赖可能过期的 row.Slot。
+    /// </summary>
+    private void MarkRowClosed(SlotViewModel row, WindowInfo closed)
+    {
+        // 二级：替换组内这个成员
+        if (_vm.Level == SelectorLevel.InGroup && _openGroup != null && _openGroupIndex >= 0)
+        {
+            int memberIdx = _vm.Slots.IndexOf(row);
+            if (memberIdx < 0) return;
+            var group = _openGroupIndex < _topSlots.Count ? _topSlots[_openGroupIndex] : null;
+            if (group == null) return;
+
+            ResolvedSlot rebuilt;
+            if (group.Children != null)
+            {
+                var children = group.Children.ToList();
+                if (memberIdx >= children.Count) return;
+                children[memberIdx] = children[memberIdx].WithWindows(new[] { GhostOf(children[memberIdx], closed) });
+                rebuilt = group.WithChildren(children);
+            }
+            else
+            {
+                if (memberIdx >= group.Windows.Count) return;
+                var windows = group.Windows.ToList();
+                windows[memberIdx] = GhostOfWindow(closed);
+                rebuilt = group.WithWindows(windows);
+            }
+
+            int gi = _openGroupIndex;
+            var slots = _topSlots.ToList();
+            slots[gi] = rebuilt;
+            _topSlots = slots;
+            _openGroup = rebuilt;
+            BuildGroupRows(rebuilt);
+            SelectClamped(memberIdx);
+            return;
+        }
+
+        // 一级：替换槽位（单窗口槽位整格转占位；组/多窗口槽位只把被关的那个成员转占位）
+        int topIdx = TopIndexOf(row);
+        if (topIdx < 0) return;
+        var live = _topSlots[topIdx];
+        ResolvedSlot updated;
+        if (live.Windows.Count > 1)
+        {
+            var windows = live.Windows.ToList();
+            int wi = windows.FindIndex(x => x.Hwnd == closed.Hwnd);
+            if (wi < 0) return;
+            windows[wi] = GhostOfWindow(closed);
+            updated = live.WithWindows(windows);
+        }
+        else
+        {
+            updated = live.WithWindows(new[] { GhostOf(live, closed) });
+        }
+        var slotList = _topSlots.ToList();
+        slotList[topIdx] = updated;
+        _topSlots = slotList;
+        BuildRows(_topSlots);
+        SelectTopIndex(topIdx);
+    }
+
+    /// <summary>
+    /// 移除"未运行"占位行。占位是锁定定义的产物，**必须落盘**才不会下次唤起又冒出来。
+    /// 解锁占位、右键"关闭程序"点在占位上都走这里。
+    /// </summary>
+    private void RemoveGhostRow(SlotViewModel row)
+    {
+        // 二级：从组里移除这个占位成员
+        if (_vm.Level == SelectorLevel.InGroup && _openGroup != null && _openGroupIndex >= 0)
+        {
+            int memberIdx = _vm.Slots.IndexOf(row);
+            if (memberIdx < 0) return;
+            var result = SlotEditor.RemoveMemberFromGroup(_topSlots, _openGroupIndex, memberIdx);
+            if (result == null) return;
+            Logger.Info($"移除组内占位: {row.Name}");
+            CommitGroupReorder(result, _openGroupIndex, Math.Max(0, memberIdx - 1));
+            return;
+        }
+
+        int idx = TopIndexOf(row);
+        if (idx < 0) return;
+        Logger.Info($"移除占位槽位: {row.Name}");
+        CommitLayout(SlotEditor.RemoveAt(_topSlots, idx), Math.Max(0, idx - 1), compact: false);
+    }
+
+    /// <summary>整槽位转占位：Hwnd=0，标题沿用用户改过的名字，没有就用被关窗口的标题。</summary>
+    private static WindowInfo GhostOf(ResolvedSlot slot, WindowInfo closed)
+    {
+        string proc = closed.ProcessName;
+        string title = !string.IsNullOrWhiteSpace(slot.CustomName) ? slot.CustomName
+            : !string.IsNullOrWhiteSpace(slot.Name) ? slot.Name
+            : closed.Title;
+        return new WindowInfo(IntPtr.Zero, title, proc, 0, false);
+    }
+
+    /// <summary>组内单个成员转占位：标题沿用被关窗口的实际标题。</summary>
+    private static WindowInfo GhostOfWindow(WindowInfo closed) =>
+        new(IntPtr.Zero, closed.Title, closed.ProcessName, 0, false);
 
     /// <summary>把一个槽位从当前视图里去掉（不改持久化布局）。</summary>
     private void RemoveRowFromView(SlotViewModel row)

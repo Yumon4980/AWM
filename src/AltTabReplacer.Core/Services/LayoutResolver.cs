@@ -51,8 +51,27 @@ public sealed class ResolvedSlot
     /// </summary>
     public bool NoAutoGroup { get; init; }
 
+    /// <summary>
+    /// 整槽位的启动兜底路径（锁定槽位窗口全关后重新启动用）。
+    /// 有 Members 的槽位优先用 <see cref="MemberSpec.ExePath"/>；这条是按进程语义的
+    /// 窗口 / 自动折叠组的兜底，来自 <see cref="SlotDefinition.ExePath"/>。
+    /// </summary>
+    public string? LaunchPath { get; init; }
+
+    /// <summary>
+    /// 整槽位级的启动命令行参数（同进程下需要 args 区分窗口，比如 explorer 路径窗口）。
+    /// 优先用成员 <see cref="MemberSpec.LaunchArgs"/>；这是按进程语义组的兜底。
+    /// </summary>
+    public string? LaunchArgs { get; init; }
+
     /// <summary>手工创建的空程序组：没有成员也要显示在界面上。</summary>
     public bool IsEmptyGroup { get; init; }
+
+    /// <summary>
+    /// 窗口是否已经全部关闭（锁定槽位的"未运行"态）。
+    /// 已关闭的成员用 Hwnd=0 的占位窗口表示——槽位还在网格上，按键时重新启动。
+    /// </summary>
+    public bool IsClosed => Windows.Count == 0 || Windows.All(w => w.Hwnd == IntPtr.Zero);
 
     /// <summary>锁定：固定占住 <see cref="Position"/> 键位，排序 / 删除都不移动它。</summary>
     public bool Locked { get; init; }
@@ -79,6 +98,8 @@ public sealed class ResolvedSlot
         IsEmptyGroup = IsEmptyGroup,
         Locked = Locked,
         Position = Position,
+        LaunchPath = LaunchPath,
+        LaunchArgs = LaunchArgs,
     };
 
     /// <summary>
@@ -100,6 +121,73 @@ public sealed class ResolvedSlot
         IsEmptyGroup = IsEmptyGroup,
         Locked = locked,
         Position = position,
+        LaunchPath = LaunchPath,
+        LaunchArgs = LaunchArgs,
+    };
+
+    /// <summary>替换窗口列表的副本（其余字段原样保留）。锁定槽位的窗口关闭后就地变"未运行"时用。</summary>
+    public ResolvedSlot WithWindows(IReadOnlyList<WindowInfo> windows) => new()
+    {
+        Kind = Kind,
+        Name = Name,
+        CustomName = CustomName,
+        Windows = windows,
+        Children = Children,
+        Processes = Processes,
+        IsOverflow = IsOverflow,
+        MemberOrder = MemberOrder,
+        Members = Members,
+        NoAutoGroup = NoAutoGroup,
+        IsEmptyGroup = IsEmptyGroup,
+        Locked = Locked,
+        Position = Position,
+        LaunchPath = LaunchPath,
+        LaunchArgs = LaunchArgs,
+    };
+
+    /// <summary>
+    /// 替换子项列表的副本（手工程序组）。展平窗口 / 进程集合随子项重算，
+    /// 语义与 <see cref="SlotEditor"/> 的组重建保持一致。
+    /// </summary>
+    public ResolvedSlot WithChildren(IReadOnlyList<ResolvedSlot> children) => new()
+    {
+        Kind = Kind,
+        Name = Name,
+        CustomName = CustomName,
+        Children = children,
+        Windows = children.SelectMany(c => c.Windows).ToList(),
+        Processes = children.SelectMany(c => c.Processes)
+                            .Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+        IsOverflow = IsOverflow,
+        MemberOrder = MemberOrder,
+        Members = Members,
+        NoAutoGroup = NoAutoGroup,
+        IsEmptyGroup = children.Count == 0,
+        Locked = Locked,
+        Position = Position,
+        LaunchPath = LaunchPath,
+        LaunchArgs = LaunchArgs,
+    };
+
+    /// <summary>替换启动兜底路径 / 成员描述的副本（锁定时记录"未开则启动"的路径用）。</summary>
+    public ResolvedSlot WithLaunch(string? launchPath, IReadOnlyList<MemberSpec>? members = null,
+        string? launchArgs = null) => new()
+    {
+        Kind = Kind,
+        Name = Name,
+        CustomName = CustomName,
+        Windows = Windows,
+        Children = Children,
+        Processes = Processes,
+        IsOverflow = IsOverflow,
+        MemberOrder = MemberOrder,
+        Members = members ?? Members,
+        NoAutoGroup = NoAutoGroup,
+        IsEmptyGroup = IsEmptyGroup,
+        Locked = Locked,
+        Position = Position,
+        LaunchPath = launchPath,
+        LaunchArgs = launchArgs ?? LaunchArgs,
     };
 
     /// <summary>
@@ -116,7 +204,9 @@ public sealed class ResolvedSlot
             {
                 DisplayName = string.IsNullOrWhiteSpace(name) ? null : name,
                 ExePath = m.ExePath,
+                LaunchArgs = m.LaunchArgs,
                 Hwnd = m.Hwnd,
+                Locked = m.Locked,
             }
         };
     }
@@ -153,7 +243,8 @@ public static class LayoutResolver
         LayoutDocument layout,
         int autoGroupThreshold = 2)
     {
-        if (windows.Count == 0) return Array.Empty<ResolvedSlot>();
+        // 不再在"无窗口"时提前返回：锁定槽位的窗口全关后也要解析出来（未运行态），
+        // 否则窗口全关后连选择器都唤不出来了。
 
         // windows 已按 z-order 排好（最近激活的在前），后面所有"组内顺序"都直接沿用这个次序
         var remaining = new List<WindowInfo>(windows);
@@ -190,7 +281,8 @@ public static class LayoutResolver
     private static IEnumerable<ResolvedSlot> ResolveDefinition(
         SlotDefinition def, List<WindowInfo> remaining,
         IReadOnlyList<WindowInfo> zorder, int autoGroupThreshold,
-        Dictionary<MemberSpec, WindowInfo?> exact)
+        Dictionary<MemberSpec, WindowInfo?> exact,
+        bool inheritLock = false)
     {
         if (def.Kind == SlotKind.Combination)
         {
@@ -202,12 +294,12 @@ public static class LayoutResolver
         // 手工程序组：有 Children（新格式）或 Members（旧格式的组，迁移成子项）
         if (def.Kind == SlotKind.Group && (def.Children != null || def.Members != null))
         {
-            yield return ResolveManualGroup(def, remaining, zorder, autoGroupThreshold, exact);
+            yield return ResolveManualGroup(def, remaining, zorder, autoGroupThreshold, exact, inheritLock);
             yield break;
         }
 
         // 程序 / 自动折叠组
-        foreach (var s in ResolveFlat(def, remaining, zorder, autoGroupThreshold, exact))
+        foreach (var s in ResolveFlat(def, remaining, zorder, autoGroupThreshold, exact, inheritLock))
             yield return s;
     }
 
@@ -238,13 +330,15 @@ public static class LayoutResolver
             Members = refs,   // 保留全部 refs（含未开的），按下时据此启动
             Locked = def.Locked,
             Position = def.Position,
+            LaunchPath = def.ExePath,
+            LaunchArgs = def.LaunchArgs,
         };
     }
 
     private static ResolvedSlot ResolveManualGroup(
         SlotDefinition def, List<WindowInfo> remaining,
         IReadOnlyList<WindowInfo> zorder, int autoGroupThreshold,
-        Dictionary<MemberSpec, WindowInfo?> exact)
+        Dictionary<MemberSpec, WindowInfo?> exact, bool inheritLock)
     {
         var children = new List<ResolvedSlot>();
 
@@ -252,18 +346,27 @@ public static class LayoutResolver
         {
             foreach (var childDef in def.Children)
             {
-                foreach (var c in ResolveDefinition(childDef, remaining, zorder, autoGroupThreshold, exact))
+                // 组被锁定 = 整个结构都要保留：成员窗口关掉后组内也保留"未运行"占位
+                foreach (var c in ResolveDefinition(childDef, remaining, zorder, autoGroupThreshold, exact,
+                             inheritLock: inheritLock || def.Locked))
                     children.Add(c);
             }
         }
         else if (def.Members is { Count: > 0 })
         {
             // 旧格式：Members 是扁平窗口列表，迁移成"每个窗口一个程序子项"
+            bool strict = def.Locked || inheritLock;
             foreach (var spec in def.Members)
             {
-                var w = Claim(spec, remaining, exact);
-                if (w == null) continue;
-                children.Add(MakeWindow(w, spec.DisplayName, null));
+                var w = Claim(spec, remaining, exact, strict: strict || spec.Locked);
+                if (w == null)
+                {
+                    if (def.Locked || inheritLock || spec.Locked)
+                        children.Add(MakeGhostWindow(spec, spec.DisplayName, locked: def.Locked || spec.Locked,
+                            position: null, launchPath: spec.ExePath));
+                    continue;
+                }
+                children.Add(MakeWindow(w, spec.DisplayName, null, spec: spec));
             }
         }
 
@@ -281,6 +384,8 @@ public static class LayoutResolver
             IsEmptyGroup = children.Count == 0,
             Locked = def.Locked,
             Position = def.Position,
+            LaunchPath = def.ExePath,
+            LaunchArgs = def.LaunchArgs,
         };
     }
 
@@ -288,7 +393,7 @@ public static class LayoutResolver
     private static IEnumerable<ResolvedSlot> ResolveFlat(
         SlotDefinition def, List<WindowInfo> remaining,
         IReadOnlyList<WindowInfo> zorder, int autoGroupThreshold,
-        Dictionary<MemberSpec, WindowInfo?> exact)
+        Dictionary<MemberSpec, WindowInfo?> exact, bool inheritLock)
     {
         var taken = new List<WindowInfo>();
         // 与 taken 一一对应的 spec 列表：某个成员这轮没认领到窗口时，
@@ -298,12 +403,24 @@ public static class LayoutResolver
         if (def.Members is { Count: > 0 })
         {
             matchedSpecs = new List<MemberSpec>(def.Members.Count);
+            // 锁定槽位 / 锁定组：成员严格认领，不走"按进程挑最像"的兜底——
+            // 否则同进程的无关窗口会被吸进槽位（explorer 主页抢路径窗口、Chrome 新标签抢旧标签等）。
+            bool strict = def.Locked || inheritLock;
             foreach (var spec in def.Members)
             {
-                var w = Claim(spec, remaining, exact);
-                if (w == null) continue;          // 这个成员没开，跳过它和它的 spec
-                taken.Add(w);
-                matchedSpecs.Add(spec);
+                var w = Claim(spec, remaining, exact, strict: strict || spec.Locked);
+                if (w != null)
+                {
+                    taken.Add(w);
+                    matchedSpecs.Add(spec);
+                }
+                else if (def.Locked || inheritLock || spec.Locked)
+                {
+                    // 锁定的成员窗口关掉后不消失：用 Hwnd=0 的占位窗口留在原位，
+                    // 按键时按记录的可执行路径重新启动。
+                    taken.Add(GhostWindow(spec));
+                    matchedSpecs.Add(spec);
+                }
             }
         }
         else
@@ -324,7 +441,18 @@ public static class LayoutResolver
             taken = SortByZOrder(taken, zorder);
         }
 
-        if (taken.Count == 0) yield break;   // 这条布局对应的窗口这次一个都没开，丢弃
+        if (taken.Count == 0)
+        {
+            // 这条布局对应的窗口这次一个都没开。锁定的槽位仍然保留（未运行态），
+            // 否则锁定键位会随着程序关闭而消失。
+            if ((def.Locked || inheritLock) && def.Processes.Count > 0)
+            {
+                yield return MakeGhostWindow(
+                    new MemberSpec(def.Processes[0], null), def.Name,
+                    locked: def.Locked, position: def.Position, launchPath: def.ExePath);
+            }
+            yield break;
+        }
 
         // 旧字段兼容：解散单进程组 → 每窗口一个槽位
         if (def.NoAutoGroup && def.Members is null or { Count: 0 } && taken.Count > 1)
@@ -334,18 +462,20 @@ public static class LayoutResolver
             yield break;
         }
 
-        foreach (var s in AutoSlots(def.Kind, taken, autoGroupThreshold, def.Name, matchedSpecs, def.MemberOrder, def.Locked, def.Position))
+        foreach (var s in AutoSlots(def.Kind, taken, autoGroupThreshold, def.Name, matchedSpecs,
+                     def.MemberOrder, def.Locked, def.Position, def.ExePath))
             yield return s;
     }
 
     /// <summary>
     /// 决定一批窗口该做成一个自动折叠组，还是拆成独立的窗口槽位。
     /// 自动组没有 Children，用平铺的 <see cref="ResolvedSlot.Windows"/> 表示。
+    /// 列表里可能混有 Hwnd=0 的"未运行"占位窗口（锁定成员已关闭），原样带过去。
     /// </summary>
     private static IEnumerable<ResolvedSlot> AutoSlots(
         SlotKind declaredKind, List<WindowInfo> taken, int autoGroupThreshold,
         string? name, IReadOnlyList<MemberSpec>? specs, IReadOnlyList<string>? memberOrder,
-        bool locked = false, int? Position = null)
+        bool locked = false, int? Position = null, string? launchPath = null)
     {
         bool isGroup = taken.Count > 1
             && (declaredKind == SlotKind.Group || taken.Count >= autoGroupThreshold);
@@ -366,6 +496,8 @@ public static class LayoutResolver
                 Members = specs,
                 Locked = locked,
                 Position = Position,
+                LaunchPath = launchPath,
+                LaunchArgs = specs is { Count: > 0 } ? specs[0].LaunchArgs : null,
             };
             yield break;
         }
@@ -373,27 +505,91 @@ public static class LayoutResolver
         for (int i = 0; i < taken.Count; i++)
         {
             bool named = !string.IsNullOrWhiteSpace(name);
-            string? display = specs is { Count: > 0 } && i < specs.Count ? specs[i].DisplayName : null;
-            yield return MakeWindow(taken[i], display, named ? name : null, locked, Position);
+            var spec = specs is { Count: > 0 } && i < specs.Count ? specs[i] : null;
+            string? display = spec?.DisplayName;
+            yield return MakeWindow(taken[i], display, named ? name : null, locked, Position, spec, launchPath);
         }
     }
 
     private static ResolvedSlot MakeWindow(WindowInfo w, string? display, string? customName,
-        bool locked = false, int? Position = null)
+        bool locked = false, int? Position = null,
+        MemberSpec? spec = null, string? launchPath = null)
     {
         string? effectiveCustom = !string.IsNullOrWhiteSpace(display) ? display : customName;
+        // 带上 spec 的既有信息（ExePath / 启动参数 / 锁定标记），否则一次"解析→落盘"循环就把
+        // 锁定时记录的可执行路径冲掉了。窗口标题存在时以窗口实际标题为准；spec.Title 是"原始目标"
+        // 标题（ex: explorer 路径），落盘后用来跨次唤起精确认领原窗口，必须保留。
+        // explorer 路径窗口的标题就是路径；首次解析时把它记成 LaunchArgs，
+        // 这样锁定后关闭窗口，按键能 `explorer.exe "<原路径>"` 精确重启。
+        string? explorerArgs = IsExplorer(w.ProcessName) ? GetExplorerPathArgs(w.Title) : null;
+        string memberTitle = spec != null && !string.IsNullOrEmpty(spec.Title)
+            ? spec.Title
+            : w.Title;
+        var member = spec != null
+            ? new MemberSpec(spec.Process, memberTitle)
+            {
+                DisplayName = display ?? spec.DisplayName,
+                ExePath = spec.ExePath,
+                LaunchArgs = spec.LaunchArgs ?? explorerArgs,
+                Hwnd = (long)w.Hwnd,
+                Locked = spec.Locked,
+            }
+            : new MemberSpec(w.ProcessName, w.Title)
+            {
+                DisplayName = display,
+                Hwnd = (long)w.Hwnd,
+                ExePath = launchPath,
+                LaunchArgs = explorerArgs,
+            };
         return new ResolvedSlot
         {
             Kind = SlotKind.Window,
+            // 名字用 spec 原始标题（ex: "D:\Projects"），不写"主页"——避免再次解析时被覆盖
             Name = !string.IsNullOrWhiteSpace(display) ? display!
                 : !string.IsNullOrWhiteSpace(customName) ? customName!
-                : w.Title,
+                : (spec != null && !string.IsNullOrEmpty(spec.Title) ? spec.Title : w.Title),
             CustomName = effectiveCustom,
             Windows = new[] { w },
             Processes = new[] { w.ProcessName },
-            Members = new[] { new MemberSpec(w.ProcessName, w.Title) { DisplayName = display, Hwnd = (long)w.Hwnd } },
+            Members = new[] { member },
             Locked = locked,
             Position = Position,
+            LaunchPath = launchPath,
+            LaunchArgs = member.LaunchArgs,
+        };
+    }
+
+    // ============================================================
+    //  未运行占位（锁定槽位的窗口全关后仍然保留在键位上）
+    // ============================================================
+
+    /// <summary>已关闭成员的占位窗口：Hwnd=0，标题取显示名 / 原标题 / 进程名。</summary>
+    private static WindowInfo GhostWindow(MemberSpec spec)
+    {
+        string title = !string.IsNullOrWhiteSpace(spec.DisplayName) ? spec.DisplayName
+            : !string.IsNullOrWhiteSpace(spec.Title) ? spec.Title
+            : StripExe(spec.Process);
+        return new WindowInfo(IntPtr.Zero, title, spec.Process, 0, false);
+    }
+
+    /// <summary>一个"未运行"的程序槽位：窗口列表里只有占位窗口，按下时按 ExePath / LaunchPath 重启。</summary>
+    private static ResolvedSlot MakeGhostWindow(
+        MemberSpec spec, string? name, bool locked, int? position, string? launchPath)
+    {
+        var ghost = GhostWindow(spec);
+        string display = !string.IsNullOrWhiteSpace(name) ? name! : ghost.Title;
+        return new ResolvedSlot
+        {
+            Kind = SlotKind.Window,
+            Name = display,
+            CustomName = name,
+            Windows = new[] { ghost },
+            Processes = new[] { spec.Process },
+            Members = new[] { spec },
+            Locked = locked,
+            Position = position,
+            LaunchPath = launchPath ?? spec.ExePath,
+            LaunchArgs = spec.LaunchArgs,
         };
     }
 
@@ -444,11 +640,15 @@ public static class LayoutResolver
 
     /// <summary>先吃预留下的匹配，没有再按进程"挑最像的"兜底。命中的窗口会回填句柄提示。</summary>
     private static WindowInfo? Claim(
-        MemberSpec spec, List<WindowInfo> remaining, Dictionary<MemberSpec, WindowInfo?> exact)
+        MemberSpec spec, List<WindowInfo> remaining, Dictionary<MemberSpec, WindowInfo?> exact,
+        bool strict = false)
     {
+        // strict=true（来自锁定槽位 / 锁定组）时不走"按进程挑最像"的兜底：
+        // 兜底会把同进程里无关窗口（explorer 主页 / 新打开的标签页等）吸进槽位，
+        // 破坏"一个槽位对应一个具体窗口"的语义。锁定只精确 / 按句柄认领。
         WindowInfo? w = exact.TryGetValue(spec, out var e) && e != null
             ? e
-            : TakeBestMatch(remaining, spec);
+            : strict ? null : TakeBestMatch(remaining, spec);
 
         // 回填句柄提示：同一次运行的后续解析据此精确认领（标题再变也不丢）。
         if (w != null && spec.Hwnd != (long)w.Hwnd) spec.Hwnd = (long)w.Hwnd;
@@ -593,6 +793,35 @@ public static class LayoutResolver
             ? proc[..^4]
             : proc;
 
+    /// <summary>
+    /// 从 explorer 窗口标题反查它实际打开的路径。
+    /// explorer 路径窗口的窗口标题 = 完整路径（或"路径 - 文件名"），是窗口本身的标题。
+    /// 主页（"主页"/"Desktop"）等不是路径，原样返回 null。
+    ///
+    /// **注意**：explorer 对长路径会自动在中间插入 `...` 截断（如 `D:\Pro...\sub`），
+    /// 这种情况下函数返回 null——截断的路径传给 explorer.exe 无法恢复精确位置，
+    /// 必须在用户右键"设置启动参数"里手动填写完整路径。
+    /// </summary>
+    public static string? GetExplorerPathArgs(string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return null;
+        if (title == "主页" || title.Equals("Desktop", StringComparison.OrdinalIgnoreCase)) return null;
+        // 形如 "D:\foo\bar - 子目录" 的，按第一个 " - " 截取前段作为路径
+        int sep = title.IndexOf(" - ", StringComparison.Ordinal);
+        string path = sep > 0 ? title[..sep] : title;
+        // 截断形式（含 `...`）不可用：explorer 命令行不会展开它
+        if (path.Contains("...", StringComparison.Ordinal)) return null;
+        // 必须看起来像路径（含盘符 + 冒号，或 UNC \\...），否则不算
+        if (path.Length >= 2 && char.IsLetter(path[0]) && path[1] == ':') return path;
+        if (path.Length >= 2 && path[0] == '\\' && path[1] == '\\') return path;
+        return null;
+    }
+
+    /// <summary>从进程名判断是不是资源管理器（explorer.exe）。</summary>
+    public static bool IsExplorer(string processName) =>
+        string.Equals(processName, "explorer", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(processName, "explorer.exe", StringComparison.OrdinalIgnoreCase);
+
     // ============================================================
     //  持久化
     // ============================================================
@@ -639,6 +868,8 @@ public static class LayoutResolver
                 Children = new List<SlotDefinition>(),
                 Locked = s.Locked,
                 Position = s.Position,
+                ExePath = s.LaunchPath,
+                LaunchArgs = s.LaunchArgs,
             };
             foreach (var c in s.Children)
                 AddDefinition(def.Children, c);
@@ -657,6 +888,8 @@ public static class LayoutResolver
                 Members = s.Members.ToList(),
                 Locked = s.Locked,
                 Position = s.Position,
+                ExePath = s.LaunchPath,
+                LaunchArgs = s.LaunchArgs,
             });
             return;
         }
@@ -671,6 +904,7 @@ public static class LayoutResolver
             MemberOrder = s.MemberOrder?.ToList(),
             Locked = s.Locked,
             Position = s.Position,
+            ExePath = s.LaunchPath,
         });
     }
 }

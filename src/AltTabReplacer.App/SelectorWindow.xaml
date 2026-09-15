@@ -51,6 +51,16 @@
 
                 <!-- 有内容的格 -->
                 <Grid Visibility="{Binding IsEmpty, Converter={StaticResource BoolToVis}, ConverterParameter=invert}">
+                    <Grid.Style>
+                        <Style TargetType="Grid">
+                            <Style.Triggers>
+                                <!-- 未运行（锁定槽位的程序已关闭）：内容压暗，按键可重新启动 -->
+                                <DataTrigger Binding="{Binding IsClosed}" Value="True">
+                                    <Setter Property="Opacity" Value="0.45"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Grid.Style>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
@@ -112,6 +122,9 @@
                         <TextBlock Text="›" Foreground="#FF9ACBF0" FontSize="13" FontWeight="Bold"
                                    VerticalAlignment="Center" Margin="0,0,2,0"
                                    Visibility="{Binding ArrowVisibility}"/>
+                        <TextBlock Text="未运行" Foreground="#FFBBBBBB" FontSize="9"
+                                   VerticalAlignment="Center" Margin="0,0,3,0"
+                                   Visibility="{Binding ClosedVisibility}"/>
                         <Border Background="Transparent" Padding="3,1" Margin="1" Cursor="Hand"
                                 ToolTip="锁定：固定占住这个键位，排序/删除都不会移动它"
                                 PreviewMouseLeftButtonUp="OnLockToggleClick">
@@ -187,9 +200,14 @@
                 <TextBlock Grid.Column="2" Text="{Binding Name}" Foreground="#FFDDDDDD" FontSize="11"
                            VerticalAlignment="Center" Margin="6,0,0,0" TextTrimming="CharacterEllipsis"/>
 
-                <TextBlock Grid.Column="3" Text="{Binding CountBadge}" Foreground="#FF9ACBF0" FontSize="10"
-                           VerticalAlignment="Center" Margin="4,0,2,0"
-                           Visibility="{Binding ContainerVisibility}"/>
+                <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding CountBadge}" Foreground="#FF9ACBF0" FontSize="10"
+                               VerticalAlignment="Center" Margin="4,0,2,0"
+                               Visibility="{Binding ContainerVisibility}"/>
+                    <TextBlock Text="未运行" Foreground="#FFBBBBBB" FontSize="9"
+                               VerticalAlignment="Center" Margin="4,0,2,0"
+                               Visibility="{Binding ClosedVisibility}"/>
+                </StackPanel>
             </Grid>
         </DataTemplate>
     </Window.Resources>

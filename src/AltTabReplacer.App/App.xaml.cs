@@ -396,18 +396,20 @@ public partial class App : System.Windows.Application
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
             var windows = _enumerator!.Enumerate();
-            if (windows.Count == 0)
-            {
-                Logger.Info("无可见窗口，跳过");
-                return;
-            }
 
             // 枚举结果 + 持久化布局 → 实际的槽位树（含自动折叠）。
             // 一页放不下的槽位不再折成"更多…"，由选择器放进"未入网格"列表。
+            // 窗口全关时也照常解析：锁定槽位会以"未运行"占位出现，按键可重新启动。
             var slots = LayoutResolver.Resolve(
                 windows,
                 _layoutStore!.Current,
                 _settings!.Layout.AutoGroupThreshold);
+
+            if (windows.Count == 0 && slots.Count == 0)
+            {
+                Logger.Info("无可见窗口且没有锁定槽位，跳过");
+                return;
+            }
 
             // 不在这里抢前台。HostWindow 是 Visibility=Hidden 的 0x0 窗口，把它顶到前台
             // 既要 SW_SHOW 一个本该隐藏的窗口，又会把已打开的选择器挤失焦触发自动关闭。

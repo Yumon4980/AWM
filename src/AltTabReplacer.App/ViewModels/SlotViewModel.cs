@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Media.Imaging;
@@ -108,6 +109,15 @@ public sealed class SlotViewModel : INotifyPropertyChanged
 
     /// <summary>锁定图标（Segoe MDL2 Assets 字形）：E72E = 锁，E785 = 未锁。空格不显示。</summary>
     public string LockGlyph => IsEmpty ? "" : (Slot.Locked ? "\uE72E" : "\uE785");
+
+    /// <summary>
+    /// "未运行"态：锁定槽位的程序/成员已全部关闭，占位保留在键位上，
+    /// 按键时按记录的路径重新启动。程序组本身是容器，不算未运行。
+    /// </summary>
+    public bool IsClosed => !IsEmpty && Slot.Kind != SlotKind.Group && Slot.IsClosed;
+
+    /// <summary>只有"未运行"的程序 / 程序组合行才显示提示徽标。</summary>
+    public Visibility ClosedVisibility => IsClosed ? Visibility.Visible : Visibility.Collapsed;
 
     /// <summary>创建一个空占位格（只有键标）。</summary>
     public static SlotViewModel Empty(string keyLabel) => new(keyLabel);
