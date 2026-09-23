@@ -48,6 +48,116 @@
             <Setter Property="Margin" Value="0,0,0,12"/>
         </Style>
 
+        <!-- 主题下拉框：WPF 默认 ComboBox 模板自带白底、不吃 Background/Foreground，
+             深色模式下会变成"白底灰字"，必须整体替换模板、全部走主题画刷。 -->
+        <ControlTemplate x:Key="FieldComboToggleTemplate" TargetType="ToggleButton">
+            <Border x:Name="Bd"
+                    Background="{DynamicResource InputBackground}"
+                    BorderBrush="{DynamicResource BorderBrushStrong}"
+                    BorderThickness="1"
+                    CornerRadius="3">
+                <Path Data="M 0 0 L 4 4 L 8 0 Z"
+                      Fill="{DynamicResource TextForegroundDim}"
+                      HorizontalAlignment="Right"
+                      VerticalAlignment="Center"
+                      Margin="0,0,9,0"/>
+            </Border>
+            <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource AccentBrushLight}"/>
+                </Trigger>
+                <Trigger Property="IsChecked" Value="True">
+                    <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                </Trigger>
+            </ControlTemplate.Triggers>
+        </ControlTemplate>
+
+        <!-- 弹出下拉项在独立的 Popup 视觉树里，ComboBox 的 Foreground 不会自动继承，必须显式指定 -->
+        <Style x:Key="FieldComboBoxItem" TargetType="ComboBoxItem">
+            <Setter Property="Foreground" Value="{DynamicResource TextForeground}"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Padding" Value="8,5"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                Padding="{TemplateBinding Padding}"
+                                CornerRadius="3"
+                                Margin="2,1">
+                            <ContentPresenter/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource HoverBackground}"/>
+                            </Trigger>
+                            <!-- IsSelected 放在 IsHighlighted 之后：选中项常驻蓝色，悬停别的高亮不打架 -->
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentBrush}"/>
+                                <Setter Property="Foreground" Value="White"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="FieldComboBox" TargetType="ComboBox">
+            <Setter Property="Background" Value="{DynamicResource InputBackground}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextForeground}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrushStrong}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <!-- 右侧留 24 给箭头，避免长文本顶到箭头 -->
+            <Setter Property="Padding" Value="8,5,24,5"/>
+            <Setter Property="MinHeight" Value="28"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="ItemContainerStyle" Value="{StaticResource FieldComboBoxItem}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <ToggleButton Focusable="False"
+                                          ClickMode="Press"
+                                          Template="{StaticResource FieldComboToggleTemplate}"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"/>
+                            <ContentPresenter IsHitTestVisible="False"
+                                              Content="{TemplateBinding SelectionBoxItem}"
+                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                              ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
+                                              Margin="{TemplateBinding Padding}"
+                                              HorizontalAlignment="Left"
+                                              VerticalAlignment="Center"/>
+                            <Popup x:Name="PART_Popup"
+                                   Placement="Bottom"
+                                   AllowsTransparency="True"
+                                   Focusable="False"
+                                   IsOpen="{TemplateBinding IsDropDownOpen}"
+                                   PopupAnimation="Fade">
+                                <Border Background="{DynamicResource InputBackground}"
+                                        BorderBrush="{DynamicResource BorderBrushStrong}"
+                                        BorderThickness="1"
+                                        CornerRadius="4"
+                                        Margin="0,2,0,0"
+                                        MinWidth="{TemplateBinding ActualWidth}"
+                                        MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                                  HorizontalScrollBarVisibility="Disabled"
+                                                  Padding="2"
+                                                  SnapsToDevicePixels="True">
+                                        <StackPanel IsItemsHost="True"
+                                                    KeyboardNavigation.DirectionalNavigation="Contained"/>
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
     </Window.Resources>
 
     <Grid>
@@ -147,21 +257,14 @@
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Style="{StaticResource FieldLabel}" Text="主题模式"/>
                             <ComboBox Grid.Column="1"
-                                      Style="{StaticResource FieldInput}"
-                                      Foreground="{DynamicResource TextForeground}"
+                                      Style="{StaticResource FieldComboBox}"
                                       SelectedItem="{Binding ThemeMode, Mode=TwoWay}"
                                       HorizontalAlignment="Stretch">
-                                <ComboBox.ItemContainerStyle>
-                                    <!-- 弹出下拉项在独立的 Popup 视觉树里，ComboBox 的 Foreground 不会自动继承，必须显式指定 -->
-                                    <Style TargetType="ComboBoxItem">
-                                        <Setter Property="Foreground" Value="{DynamicResource TextForeground}"/>
-                                        <Setter Property="Background" Value="{DynamicResource InputBackground}"/>
-                                    </Style>
-                                </ComboBox.ItemContainerStyle>
                                 <ComboBox.ItemTemplate>
+                                    <!-- Foreground 留空：闭合态继承 ComboBox，弹层里继承 ComboBoxItem
+                                         （选中项会被模板触发器改成白色，蓝底白字） -->
                                     <DataTemplate>
-                                        <TextBlock Text="{Binding Converter={StaticResource ThemeModeToText}}"
-                                                   Foreground="{DynamicResource TextForeground}"/>
+                                        <TextBlock Text="{Binding Converter={StaticResource ThemeModeToText}}"/>
                                     </DataTemplate>
                                 </ComboBox.ItemTemplate>
                                 <models:ThemeMode>System</models:ThemeMode>
