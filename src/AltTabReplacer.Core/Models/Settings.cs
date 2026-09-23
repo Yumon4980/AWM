@@ -58,6 +58,13 @@ public sealed class Settings
         public bool HideOnWindowChange { get; set; } = true;
         public bool IgnoreFullscreen { get; set; } = true;
         public int PollIntervalMs { get; set; } = 1000;
+
+        /// <summary>
+        /// 选择器右侧是否显示窗口实时截图（缩略图）。
+        /// 关闭后预览区改为"大图标 + 标题"的简化模式，
+        /// 适合截图功能有问题或性能不受限制的场景。
+        /// </summary>
+        public bool ShowThumbnails { get; set; } = true;
     }
 }
 

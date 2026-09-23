@@ -157,6 +157,48 @@ Start-Process .\AltTabReplacer.exe -ArgumentList '--config' -Verb RunAs
 | `rules.json` | 排除规则：哪些窗口不显示 |
 | `logs\app-YYYYMMDD.log` | 每日滚动日志 |
 
+### 键位网格配置（`config.json`）
+
+选择器网格的**物理键位**从 `config.json` 读取（不存在时退回与上一版
+同键的 4×4 QWERTY 布局）。文件不存在 / 解析失败都会自动退回默认布局，
+程序仍可正常启动。
+
+**查找顺序**：
+1. exe 同目录（发布版 / 手动放置）
+2. 向上找 1～5 级父目录里的 `config.json`（方便开发：exe 在
+   `src\...\App\bin\Debug\...` 时不需要手动复制，从项目根直接读）
+
+格式是一个**二维数组**：外层每个元素是一行，内层是该行的键位：
+
+```json
+[
+  ["1", "2", "3", "4", "5"],
+  ["q", "w", "e", "r", "t"],
+  ["a", "s", "d", "f", "g"],
+  ["z", "x", "c", "v", "b"]
+]
+```
+
+表示 4 行 × 5 列 = 20 个键位。各行长度不要求相同（取最长一行作列数）。
+字面量既可以是标准 JSON 字符串 `"q"`，也可以是简化的裸写法 `q`、`space`
+（JSON5 风格，配置文件场景下比每个单元都加引号更顺手）。
+
+| 写法 | 含义 | VK |
+|---|---|---|
+| `0`–`9` | 数字键 | `0x30`–`0x39` |
+| `A`–`Z` / `a`–`z` | 字母键 | `0x41`–`0x5A` |
+| `space` / ` ` | 空格 | `0x20` |
+| `tab` | Tab | `0x09` |
+| `enter` | Enter | `0x0D` |
+| `esc` / `escape` | Esc | `0x1B` |
+| `bsp` / `backspace` / `back` | Backspace | `0x08` |
+| `↑` / `up`、`↓` / `down`、`←` / `left`、`→` / `right` | 方向键 | `0x25`–`0x28` |
+
+网格行/列数变动后，列表的 `UniformGrid` 列数、底部的提示文本、键位
+索引、跨行拖动与方向键导航全部跟着调整——不需要改任何代码。
+
+> 示例：`samples/config.example.json` 是一个 4×5 的布局。
+
 ### 默认 settings.json
 
 ```json
@@ -168,7 +210,7 @@ Start-Process .\AltTabReplacer.exe -ArgumentList '--config' -Verb RunAs
     "WidthRatio": 0.5, "HeightRatio": 0.55
   },
   "Theme": { "Accent": "#FF0078D4", "Background": "#CC202020", "CornerRadius": 8 },
-  "Behavior": { "HideOnWindowChange": true, "IgnoreFullscreen": true, "PollIntervalMs": 1000 }
+  "Behavior": { "HideOnWindowChange": true, "IgnoreFullscreen": true, "PollIntervalMs": 1000, "ShowThumbnails": true }
 }
 ```
 
@@ -187,6 +229,21 @@ Start-Process .\AltTabReplacer.exe -ArgumentList '--config' -Verb RunAs
 ```
 
 保存后**重启程序**生效。
+
+### 关闭缩略图
+
+托盘图标右键菜单里有"缩略图：开 / 关"，点一下切换。关闭后预览区改为
+"大图标 + 标题"的简化模式——不调 PrintWindow，省去截图耗时，也能避开
+某些窗口（GPU 独占渲染 / 安全软件拦截）导致的选择器显示慢 / 卡顿。
+设置会立刻写回 `settings.json` 的 `Behavior.ShowThumbnails`，重启程序也保留。
+
+> `ShowThumbnails` 默认 `true`。手动在 `settings.json` 里写 `false` 等同于托盘菜单里关掉。
+
+**布局联动**：
+- 缩略图关闭后，右侧预览列整体隐藏，左侧列表占满整个窗口宽度。
+- 同时禁用 ListBox 滚动条，窗口高度自动撑开为刚好装下 R×C 个单元格——
+  不会多也不会少，也不会出现滚动条。
+- 重新打开缩略图后恢复到原来的 64/36 双列布局与屏幕比例的高度。
 
 ### 排除规则示例
 

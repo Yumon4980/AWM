@@ -3,16 +3,13 @@ using System.Collections.Generic;
 namespace AltTabReplacer.Core;
 
 /// <summary>
-/// 物理键（QWERTY 位置）→ 本地索引 0..15 的共享映射。
+/// 物理键 → 本地索引 0..N-1 的共享映射。
 ///
-/// 用左手主键区一个完整的 4×4 方块，物理位置和界面网格一一对应，肌肉记忆成本最低：
+/// 数据来自 <see cref="KeyMapConfig"/>：默认 4×4 QWERTY 布局，
+/// 也可以从 exe 同目录下的 <c>config.json</c> 加载（由调用方在启动早期
+/// <see cref="Configure"/>）。
 ///
-///     1 2 3 4     → 索引 0..3
-///     Q W E R     → 索引 4..7
-///     A S D F     → 索引 8..11
-///     Z X C V     → 索引 12..15
-///
-/// 两级结构下容量是 16 × 16 = 256 个窗口，远超实际需要。
+/// 视觉布局和物理键位一一对应，肌肉记忆成本最低。
 ///
 /// 用于：
 ///   1) SelectorWindow 渲染槽位标签 + 处理 WPF KeyDown
@@ -20,46 +17,53 @@ namespace AltTabReplacer.Core;
 /// </summary>
 public static class KeyMap
 {
-    /// <summary>一页的槽位数。</summary>
-    public const int Size = 16;
+    private static KeyMapConfig _config = KeyMapConfig.Default;
+    private static Dictionary<int, int>? _vkToIndex;
 
-    /// <summary>视觉网格的行列数（4×4），与物理键位一致。</summary>
-    public const int Rows = 4;
-    public const int Cols = 4;
+    /// <summary>当前生效的配置。启动后调用一次 <see cref="Configure"/> 替换。</summary>
+    public static KeyMapConfig Current => _config;
+
+    /// <summary>键位总数。</summary>
+    public static int Size => _config.Size;
+
+    /// <summary>视觉网格的行列数。</summary>
+    public static int Rows => _config.Rows;
+    public static int Cols => _config.Cols;
 
     /// <summary>本地索引 → Win32 VirtualKey 码。</summary>
-    public static readonly int[] IndexToVk = new[]
-    {
-        0x31, 0x32, 0x33, 0x34,     // 1 2 3 4
-        0x51, 0x57, 0x45, 0x52,     // Q W E R
-        0x41, 0x53, 0x44, 0x46,     // A S D F
-        0x5A, 0x58, 0x43, 0x56,     // Z X C V
-    };
+    public static int[] IndexToVk => _config.VirtualKeys;
 
     /// <summary>本地索引 → 显示用的字符串标签。</summary>
-    public static readonly string[] IndexToLabel = new[]
-    {
-        "1", "2", "3", "4",
-        "Q", "W", "E", "R",
-        "A", "S", "D", "F",
-        "Z", "X", "C", "V",
-    };
+    public static string[] IndexToLabel => _config.Labels;
 
-    private static readonly Dictionary<int, int> _vkToIndex;
-
-    static KeyMap()
+    /// <summary>
+    /// 切换底层配置（一般只在程序启动早期调一次）。所有通过 <see cref="KeyMap"/>
+    /// 静态属性读到的地方会立即看到新的配置。
+    /// </summary>
+    public static void Configure(KeyMapConfig config)
     {
-        _vkToIndex = new Dictionary<int, int>(IndexToVk.Length);
-        for (int i = 0; i < IndexToVk.Length; i++)
-        {
-            _vkToIndex[IndexToVk[i]] = i;
-        }
+        _config = config ?? KeyMapConfig.Default;
+        _vkToIndex = null;
     }
 
     /// <summary>把 Win32 VirtualKey 转换为本地索引；不命中返回 null。</summary>
-    public static int? ToIndex(int vk) => _vkToIndex.TryGetValue(vk, out int i) ? i : null;
+    public static int? ToIndex(int vk)
+    {
+        if (_vkToIndex == null) BuildCache();
+        return _vkToIndex!.TryGetValue(vk, out int i) ? i : null;
+    }
 
     /// <summary>索引 → 标签，越界返回 "?"。</summary>
-    public static string LabelOf(int index) =>
-        index >= 0 && index < IndexToLabel.Length ? IndexToLabel[index] : "?";
+    public static string LabelOf(int index) => _config.LabelOf(index);
+
+    private static void BuildCache()
+    {
+        var map = new Dictionary<int, int>(_config.VirtualKeys.Length);
+        for (int i = 0; i < _config.VirtualKeys.Length; i++)
+        {
+            int vk = _config.VirtualKeys[i];
+            if (vk != 0 && !map.ContainsKey(vk)) map[vk] = i;
+        }
+        _vkToIndex = map;
+    }
 }

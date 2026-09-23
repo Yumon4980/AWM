@@ -119,6 +119,12 @@ public partial class SelectorWindow : Window
 
         Loaded += (_, __) =>
         {
+            // 网格列数来自 KeyMap（从 config.json 加载，详见 KeyMapConfig.Load）。
+            // XAML 里 UniformGrid 必须留空列数才能让代码后置赋值——直接在 XAML 写 Columns="4"
+            // 会让用户配的 5 列 / 6 列失效。UniformGrid 实例的 Columns 由 OnListPanelLoaded
+            // 在首次加到可视树时设置。
+            ApplyKeyMapHint();
+            ApplyPreviewVisibility();     // 缩略图关闭时收起右侧列
             ApplyPrimaryScreenGeometry();
             WindowActivator.ForceForeground(new System.Windows.Interop.WindowInteropHelper(this).Handle);
             Activate();
@@ -158,8 +164,11 @@ public partial class SelectorWindow : Window
     private const double MinSelectorHeight = 420;
 
     /// <summary>
-    /// 尺寸和位置都从主显示器工作区算：尺寸取固定比例（与分辨率解耦），位置取正中。
-    /// 不用 WindowStartupLocation="CenterScreen"，多显示器下它居中到的不一定是主显示器。
+    /// 尺寸和位置都从主显示器工作区算：尺寸取固定比例（与分辨率解耦），
+    /// 位置按"窗口锚点 = 窗口中心"落在"工作区中心"上。
+    /// <br/>
+    /// 即 <c>(Left + Width/2, Top + Height/2) == (origin + extent/2)</c>——
+    /// 不要用 <c>WindowStartupLocation="CenterScreen"</c>，多显示器下它居中到的不一定是主显示器。
     /// </summary>
     private void ApplyPrimaryScreenGeometry()
     {
@@ -173,13 +182,20 @@ public partial class SelectorWindow : Window
         var origin = m.Transform(new System.Windows.Point(wa.Left, wa.Top));
         var extent = m.Transform(new System.Windows.Vector(wa.Width, wa.Height));
 
-        double w = Fit(extent.X, _settings.Layout.WidthRatio, MinSelectorWidth);
-        double h = Fit(extent.Y, _settings.Layout.HeightRatio, MinSelectorHeight);
+        Width = Fit(extent.X, _settings.Layout.WidthRatio, MinSelectorWidth);
+        Height = Fit(extent.Y, _settings.Layout.HeightRatio, MinSelectorHeight);
 
-        Width = w;
-        Height = h;
-        Left = origin.X + (extent.X - w) / 2;
-        Top = origin.Y + (extent.Y - h) / 2;
+        CenterOnScreen(origin, extent);
+    }
+
+    /// <summary>
+    /// 窗口锚点 = 窗口中心；让它落在主显示器工作区中心。
+    /// 与 Width/Height 联动：调用前先设好 Width/Height。
+    /// </summary>
+    private void CenterOnScreen(System.Windows.Point origin, System.Windows.Vector extent)
+    {
+        Left = origin.X + extent.X / 2 - Width / 2;
+        Top = origin.Y + extent.Y / 2 - Height / 2;
     }
 
     private static double Fit(double available, double ratio, double min)
@@ -188,6 +204,45 @@ public partial class SelectorWindow : Window
         if (v < min) v = min;
         if (v > available) v = available;
         return v;
+    }
+
+    /// <summary>
+    /// 列表的 ItemsPanel（<see cref="System.Windows.Controls.Primitives.UniformGrid"/>）
+    /// 首次被加到可视树时触发，按 <see cref="KeyMap.Cols"/> 把列数推下去。
+    /// XAML 里 UniformGrid 故意不写 Columns——硬写 4 会让用户配的 5/6 列失效。
+    /// </summary>
+    private void OnListPanelLoaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is System.Windows.Controls.Primitives.UniformGrid ug)
+            ug.Columns = KeyMap.Cols;
+    }
+
+    /// <summary>
+    /// 把"键位列"动态拼到底部提示里：行与行之间用斜杠分隔，每格之间放一个句点。
+    /// 例 4×4 QWERTY → "1234·QWER·ASDF·ZXCV 选网格 · ..."
+    /// 例 4×5 例 "1·2·3·4·5/q·w·e·r·t/..."   （分隔符和 layout.json 的二维数组行结构呼应）
+    /// </summary>
+    private void ApplyKeyMapHint()
+    {
+        var rows = new List<string>(KeyMap.Rows);
+        for (int r = 0; r < KeyMap.Rows; r++)
+        {
+            var line = new System.Text.StringBuilder(KeyMap.Cols * 2);
+            for (int c = 0; c < KeyMap.Cols; c++)
+            {
+                int idx = r * KeyMap.Cols + c;
+                if (idx >= 0 && idx < KeyMap.IndexToLabel.Length)
+                {
+                    var lbl = KeyMap.LabelOf(idx);
+                    if (string.IsNullOrWhiteSpace(lbl) || lbl == "?") continue;     // 空 / 无效键位不显示
+                    if (line.Length > 0) line.Append('·');
+                    line.Append(lbl);
+                }
+            }
+            if (line.Length > 0) rows.Add(line.ToString());
+        }
+        string keys = string.Join("/", rows);
+        PART_Hint.Text = $"{keys} 选网格 · 方向键移动 · Enter 确认 · / 搜索 · Esc 返回 · 拖到格中=并入，拖到边缘=排序";
     }
 
     // ----------------------------------------------------------
@@ -530,6 +585,16 @@ public partial class SelectorWindow : Window
         }
 
         PART_PreviewTitle.Text = title;
+
+        // 缩略图关闭时直接走大图标预览：跳过截图、免去 PrintWindow 的几百毫秒开销，
+        // 也能避开截图相关的崩溃（GPU 独占渲染、安全软件拦截等）。
+        if (!_settings.Behavior.ShowThumbnails)
+        {
+            PART_PreviewImage.Source = ComposeIconPreview(IconFor(rep), "缩略图已关闭（托盘菜单 → 缩略图）");
+            PART_PreviewPlaceholder.Visibility = Visibility.Collapsed;
+            return;
+        }
+
         BitmapSource? bmp = null;
         try { bmp = _capture.Capture(rep.Hwnd, 0, 0); } catch { /* 下面统一兜底 */ }
 
@@ -543,6 +608,81 @@ public partial class SelectorWindow : Window
             PART_PreviewImage.Source = ComposeIconPreview(IconFor(rep), "无法预览此窗口");
         }
         PART_PreviewPlaceholder.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// 外部切换了缩略图开关后调用这个让预览立即刷新（不重启选择器）。
+    /// 由 <see cref="App.OnToggleThumbnails"/> 调用。
+    /// </summary>
+    public void RefreshPreview()
+    {
+        ApplyPreviewVisibility();
+        if (!_everActivated) return;
+        UpdatePreview();
+    }
+
+    /// <summary>
+    /// 缩略图关闭时收起右侧预览列（宽度 0 + 隐藏 Border），
+    /// 同时禁用 ListBox 滚动条并把窗口高度撑到刚好装下 R×C 个单元格。
+    /// 缩略图开启时恢复 64/36 的双列布局和屏幕比例的高度。
+    /// </summary>
+    private void ApplyPreviewVisibility()
+    {
+        bool show = _settings.Behavior.ShowThumbnails;
+        PART_RightCol.Width = show ? new GridLength(0.36, GridUnitType.Star) : new GridLength(0);
+        PART_PreviewPanel.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+
+        // 缩略图关闭时禁止 ListBox 滚动——下面 FitHeightToGrid 会把窗口高度撑开
+        PART_List.SetValue(ScrollViewer.VerticalScrollBarVisibilityProperty,
+            show ? ScrollBarVisibility.Auto : ScrollBarVisibility.Disabled);
+
+        if (show)
+        {
+            // 恢复屏幕比例高度
+            ApplyPrimaryScreenGeometry();
+        }
+        else
+        {
+            // 推迟到 Loaded 优先级：那时 PART_List.ActualWidth 已经是新的（全列宽），
+            // 否则算 cellSize 时还是旧宽度，撑出来的高度偏小
+            Dispatcher.BeginInvoke(new Action(FitHeightToGrid), DispatcherPriority.Loaded);
+        }
+    }
+
+    /// <summary>
+    /// 把窗口高度撑到刚好装下所有键位单元格（不出现滚动条）。
+    /// 算法：临时 Measure 一次 PART_Root，DesiredSize.Height 就是最小内容高度，
+    /// 再加上 PART_Root 内 Grid.Margin + chrome 缓冲。
+    /// <br/>
+    /// 高度变了之后让窗口重新垂直居中：锚点（窗口中心）必须落在工作区中心。
+    /// </summary>
+    private void FitHeightToGrid()
+    {
+        if (!IsLoaded || ActualWidth <= 0) return;
+
+        // 用当前窗口宽度测一次 PART_Root（不影响 visual tree）
+        PART_Root.Measure(new System.Windows.Size(ActualWidth, double.PositiveInfinity));
+        double desired = PART_Root.DesiredSize.Height;
+
+        // PART_Root 内 Grid.Margin="12"（上下各 12）
+        // WindowStyle=None + AllowsTransparency=True，Window 没有标题栏 / 边框 chrome
+        const double gridMargin = 24;
+
+        double target = Math.Max(MinSelectorHeight, desired + gridMargin);
+        if (Math.Abs(Height - target) <= 0.5) return;
+
+        Height = target;
+
+        // 高度变了，重做一次定位。水平方向居中已经在 ApplyPrimaryScreenGeometry 时设过了；
+        // 这里只重算 Top，让窗口中心再次落在屏幕中心。
+        var screen = System.Windows.Forms.Screen.PrimaryScreen;
+        if (screen == null) return;
+        var wa = screen.WorkingArea;
+        var m = ((System.Windows.Interop.HwndSource)PresentationSource.FromVisual(this)!)
+            .CompositionTarget!.TransformFromDevice;
+        var origin = m.Transform(new System.Windows.Point(wa.Left, wa.Top));
+        var extent = m.Transform(new System.Windows.Vector(wa.Width, wa.Height));
+        CenterOnScreen(origin, extent);
     }
 
     /// <summary>合成一张占位预览图：深色底 + 居中大图标 + 一行提示文字。</summary>

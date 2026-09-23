@@ -5,13 +5,17 @@ using System.Windows.Data;
 
 namespace AltTabReplacer;
 
-/// <summary>把"网格可用宽度"换算成方形单元格边长（宽 / 列数，再扣掉单元格外边距）。</summary>
+/// <summary>
+/// 把"网格可用宽度"换算成方形单元格边长（宽 / 列数，再扣掉单元格外边距）。
+/// 列数默认从 <see cref="Core.KeyMap.Cols"/> 取；XAML 里可用 <c>ConverterParameter</c>
+/// 显式覆盖（少数不需要跟随网格列数的场景）。
+/// </summary>
 public sealed class CellSizeConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
     {
         double width = value is double d ? d : 0;
-        double cols = 4;
+        double cols = Core.KeyMap.Cols;
         if (parameter is string s
             && double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var p)
             && p > 0)

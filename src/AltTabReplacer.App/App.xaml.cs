@@ -5,6 +5,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Threading;
+using AltTabReplacer.Core;
 using AltTabReplacer.Core.Infrastructure;
 using AltTabReplacer.Core.Models;
 using AltTabReplacer.Core.Services;
@@ -34,6 +35,8 @@ public partial class App : System.Windows.Application
     private DispatcherTimer? _hookWatchdog;
     private bool _hookWasInstalled = true;
     private WinForms.NotifyIcon? _trayIcon;
+    /// <summary>托盘菜单里“缩略图”项的引用。运行时需要更新文字反映当前状态。</summary>
+    private WinForms.ToolStripMenuItem? _thumbnailsMenuItem;
     private volatile bool _selectorActive;
     /// <summary>
     /// 暂时放行索引键（16 个键）给文本输入。
@@ -67,6 +70,11 @@ public partial class App : System.Windows.Application
 
             // 1) 解析命令行
             bool configMode = e.Args.Any(a => string.Equals(a, "--config", StringComparison.OrdinalIgnoreCase));
+
+            // 1b) 加载键位网格配置（必须在任何用到 KeyMap.Size / Cols / LabelOf 的代码之前）。
+            //     从 exe 同目录的 config.json 读，文件不存在 / 解析失败退回默认 4×4 QWERTY。
+            var keyMapPath = KeyMapConfig.DefaultPath;
+            KeyMap.Configure(KeyMapConfig.Load(keyMapPath));
 
             // 2) 加载配置
             _settings = SettingsLoader.Load(SettingsLoader.DefaultPath);
@@ -275,6 +283,16 @@ public partial class App : System.Windows.Application
         menu.Items.Add($"显示选择器 ({HotkeyLabel})", null, (_, __) => OnHotkeyPressed());
         // menu.Items.Add("重置分组与顺序", null, (_, __) => ResetLayout());#已屏蔽，后续考虑加不加入
         // menu.Items.Add("打开规则配置", null, (_, __) => LaunchConfigInNewProcess());#已屏蔽，后续考虑加不加入
+
+        _thumbnailsMenuItem = new WinForms.ToolStripMenuItem("缩略图：—")
+        {
+            CheckOnClick = true,
+            Checked = _settings!.Behavior.ShowThumbnails,
+        };
+        _thumbnailsMenuItem.CheckedChanged += (_, __) => OnToggleThumbnails(_thumbnailsMenuItem.Checked);
+        UpdateThumbnailsMenuLabel();      // 初始化"开 / 关"文字
+        menu.Items.Add(_thumbnailsMenuItem);
+
         menu.Items.Add(new WinForms.ToolStripSeparator());
         menu.Items.Add("退出", null, (_, __) =>
         {
@@ -293,6 +311,38 @@ public partial class App : System.Windows.Application
         Logger.Info("托盘图标已创建");
 
         // 规则为空不再弹窗——托盘菜单里随时可以打开配置
+    }
+
+    /// <summary>同步托盘菜单上"缩略图"项的文字，反映当前状态。</summary>
+    private void UpdateThumbnailsMenuLabel()
+    {
+        if (_thumbnailsMenuItem == null || _settings == null) return;
+        _thumbnailsMenuItem.Text = _settings.Behavior.ShowThumbnails ? "缩略图：开" : "缩略图：关";
+    }
+
+    /// <summary>
+    /// 托盘菜单里切换了缩略图：写回设置、刷菜单文字。
+    /// 如果选择器当前开着，立即刷新预览区（不重启选择器）。
+    /// </summary>
+    private void OnToggleThumbnails(bool enabled)
+    {
+        if (_settings == null) return;
+        if (_settings.Behavior.ShowThumbnails == enabled) return;
+
+        _settings.Behavior.ShowThumbnails = enabled;
+        try
+        {
+            SettingsLoader.Save(SettingsLoader.DefaultPath, _settings);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"保存缩略图设置失败: {ex.Message}");
+        }
+        UpdateThumbnailsMenuLabel();
+        Logger.Info($"缩略图已{(enabled ? "开启" : "关闭")}");
+
+        // 已开着的选择器：立即用新设置重画预览。不开着的下次唤起自然用新设置。
+        _selector?.RefreshPreview();
     }
 
     /// <summary>取 exe 上嵌入的图标当托盘图标；失败退回系统默认图标。</summary>

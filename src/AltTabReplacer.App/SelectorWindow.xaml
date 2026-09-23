@@ -2,6 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:AltTabReplacer"
+        xmlns:swcp="clr-namespace:System.Windows.Controls.Primitives;assembly=PresentationFramework"
         Title="AltTabReplacer"
         WindowStyle="None"
         AllowsTransparency="True"
@@ -220,9 +221,11 @@
                 PreviewMouseLeftButtonUp="OnPreviewMouseLeftButtonUp">
             <Grid Margin="12">
                 <Grid.ColumnDefinitions>
-                    <!-- 左侧：网格 + 未入网格列表；右侧：大预览 -->
-                    <ColumnDefinition Width="0.64*" MinWidth="420"/>
-                    <ColumnDefinition Width="0.36*"/>
+                    <!-- 左侧：网格 + 未入网格列表；右侧：大预览。
+                         缩略图关闭时 PART_RightCol.Width 改为 0，右侧预览一同隐藏，
+                         左侧列表占满窗口宽度。 -->
+                    <ColumnDefinition x:Name="PART_LeftCol" Width="0.64*" MinWidth="420"/>
+                    <ColumnDefinition x:Name="PART_RightCol" Width="0.36*"/>
                 </Grid.ColumnDefinitions>
 
                 <DockPanel Grid.Column="0" Margin="0,0,8,0">
@@ -279,10 +282,10 @@
                         </Grid>
                     </Border>
 
-                    <!-- 底部操作提示 -->
-                    <TextBlock DockPanel.Dock="Bottom" Margin="2,8,0,0"
+                    <!-- 底部操作提示：键位列由 KeyMap.LabelOf 动态生成（"1234/QWER/ASDF/ZXCV" 由 R×C 决定） -->
+                    <TextBlock x:Name="PART_Hint" DockPanel.Dock="Bottom" Margin="2,8,0,0"
                                Foreground="#FF666666" FontSize="10"
-                               Text="1234/QWER/ASDF/ZXCV 选网格 · 方向键移动 · Enter 确认 · / 搜索 · Esc 返回 · 拖到格中=并入，拖到边缘=排序"/>
+                               Text="选网格 · 方向键移动 · Enter 确认 · / 搜索 · Esc 返回 · 拖到格中=并入，拖到边缘=排序"/>
 
                     <!-- 未入网格列表 | 4×4 网格。DropLayer 覆盖两者，插入线定位转到共同祖先 PART_DropHost -->
                     <Grid x:Name="PART_DropHost">
@@ -366,7 +369,8 @@
                                      SelectionChanged="OnListSelectionChanged">
                                 <ListBox.ItemsPanel>
                                     <ItemsPanelTemplate>
-                                        <UniformGrid Columns="4"/>
+                                        <!-- 列数由 SelectorWindow.OnListPanelLoaded 按 KeyMap.Cols 动态设置 -->
+                                        <swcp:UniformGrid Loaded="OnListPanelLoaded"/>
                                     </ItemsPanelTemplate>
                                 </ListBox.ItemsPanel>
                                 <ListBox.ItemContainerStyle>
@@ -374,8 +378,8 @@
                                         <Setter Property="Background" Value="Transparent"/>
                                         <Setter Property="Padding" Value="0"/>
                                         <Setter Property="Margin" Value="2"/>
-                                        <!-- 强制方形：高度跟随网格可用宽度 / 4（扣掉外边距） -->
-                                        <Setter Property="Height" Value="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType=ListBox}, Converter={StaticResource CellSize}, ConverterParameter=4}"/>
+                                        <!-- 强制方形：高度跟随网格可用宽度 / KeyMap.Cols（扣掉外边距；列数从 CellSizeConverter 内取） -->
+                                        <Setter Property="Height" Value="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType=ListBox}, Converter={StaticResource CellSize}}"/>
                                         <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                                         <Setter Property="VerticalContentAlignment" Value="Stretch"/>
                                         <Setter Property="Focusable" Value="False"/>
@@ -427,8 +431,8 @@
                     </Grid>
                 </DockPanel>
 
-                <!-- 右侧：实时预览当前选中窗口 -->
-                <Border Grid.Column="1" Background="#FF101010" CornerRadius="6" ClipToBounds="True">
+                <!-- 右侧：实时预览当前选中窗口。缩略图关闭时整个 Border 隐藏 -->
+                <Border x:Name="PART_PreviewPanel" Grid.Column="1" Background="#FF101010" CornerRadius="6" ClipToBounds="True">
                     <Grid>
                         <Image x:Name="PART_PreviewImage"
                                Stretch="Uniform"
