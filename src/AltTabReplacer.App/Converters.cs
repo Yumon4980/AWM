@@ -43,3 +43,28 @@ public sealed class BoolToVisConverter : IValueConverter
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
         => throw new NotSupportedException();
 }
+
+/// <summary>
+/// <see cref="Core.Models.ThemeMode"/> → 中文显示文本。
+/// 只做单向映射（UI 展示用），ConvertBack 不实现：ComboBox 用 SelectedItem 直接绑 enum 值。
+/// </summary>
+public sealed class ThemeModeToTextConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        if (value is Core.Models.ThemeMode m)
+        {
+            return m switch
+            {
+                Core.Models.ThemeMode.System => "跟随系统主题",
+                Core.Models.ThemeMode.Light  => "浅色",
+                Core.Models.ThemeMode.Dark   => "深色",
+                _ => m.ToString(),
+            };
+        }
+        return value?.ToString() ?? "";
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}

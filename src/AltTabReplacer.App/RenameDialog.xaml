@@ -10,20 +10,20 @@
         WindowStartupLocation="CenterOwner"
         ShowInTaskbar="False"
         Topmost="True">
-    <Border Background="#FF252525" CornerRadius="8" Padding="16"
-            BorderBrush="#FF0078D4" BorderThickness="1.5">
+    <Border Background="{DynamicResource PanelBackgroundAlt}" CornerRadius="8" Padding="16"
+            BorderBrush="{DynamicResource AccentBrush}" BorderThickness="1.5">
         <Border.Effect>
             <DropShadowEffect BlurRadius="16" Opacity="0.7" ShadowDepth="4" Color="Black"/>
         </Border.Effect>
         <StackPanel Width="320">
-            <TextBlock x:Name="PART_Label" Foreground="#FFDDDDDD" FontSize="12"
+            <TextBlock x:Name="PART_Label" Foreground="{DynamicResource TextForeground}" FontSize="12"
                        Text="重命名" Margin="0,0,0,8"/>
             <TextBox x:Name="PART_Input"
-                     Background="#FF1A1A1A" Foreground="White" FontSize="13"
-                     BorderBrush="#FF444444" BorderThickness="1"
-                     Padding="8,6" CaretBrush="White"
+                     Background="{DynamicResource InputBackground}" Foreground="{DynamicResource TextForeground}" FontSize="13"
+                     BorderBrush="{DynamicResource BorderBrushStrong}" BorderThickness="1"
+                     Padding="8,6" CaretBrush="{DynamicResource TextForeground}"
                      KeyDown="OnInputKeyDown"/>
-            <TextBlock Foreground="#FF888888" FontSize="10" Margin="0,8,0,0"
+            <TextBlock Foreground="{DynamicResource SubtleForeground}" FontSize="10" Margin="0,8,0,0"
                        Text="留空则恢复默认名 · Enter 确定 · Esc 取消"/>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
                 <Button Content="取消" Width="72" Margin="0,0,8,0" Click="OnCancelClick"/>

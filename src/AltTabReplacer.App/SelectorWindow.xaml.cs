@@ -685,15 +685,20 @@ public partial class SelectorWindow : Window
         CenterOnScreen(origin, extent);
     }
 
-    /// <summary>合成一张占位预览图：深色底 + 居中大图标 + 一行提示文字。</summary>
+    /// <summary>合成一张占位预览图：主题色底 + 居中大图标 + 一行提示文字。
+/// 主题笔刷通过 TryFindResource 即时取当前主题——切换主题后下一次选择变化自动跟随。</summary>
     private static BitmapSource ComposeIconPreview(BitmapSource? icon, string message)
     {
         const int W = 640, H = 480, IconSize = 128;
+        var app = System.Windows.Application.Current;
+        System.Windows.Media.Brush bg = (System.Windows.Media.Brush?)app?.TryFindResource("IconPreviewBackground")
+            ?? new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x10, 0x10, 0x10));
+        System.Windows.Media.Brush fg = (System.Windows.Media.Brush?)app?.TryFindResource("IconPreviewForeground")
+            ?? new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x88, 0x88, 0x88));
         var visual = new DrawingVisual();
         using (var dc = visual.RenderOpen())
         {
-            dc.DrawRectangle(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x10, 0x10, 0x10)),
-                null, new Rect(0, 0, W, H));
+            dc.DrawRectangle(bg, null, new Rect(0, 0, W, H));
             if (icon != null)
                 dc.DrawImage(icon, new Rect((W - IconSize) / 2.0, (H - IconSize) / 2.0 - 24, IconSize, IconSize));
 
@@ -703,7 +708,7 @@ public partial class SelectorWindow : Window
                 System.Windows.FlowDirection.LeftToRight,
                 new Typeface("Microsoft YaHei UI"),
                 18,
-                new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x88, 0x88, 0x88)),
+                fg,
                 96);
             dc.DrawText(text, new System.Windows.Point((W - text.Width) / 2, (H + IconSize) / 2.0));
         }
@@ -2439,11 +2444,20 @@ public partial class SelectorWindow : Window
 
     private static Border BuildGhostContent(SlotViewModel cell)
     {
+        // 主题笔刷通过 TryFindResource 即时取——拖动是短时的，下一次拖动自然用新主题。
+        var app = System.Windows.Application.Current;
+        System.Windows.Media.Brush bg = (System.Windows.Media.Brush?)app?.TryFindResource("GhostBackgroundBrush")
+            ?? new SolidColorBrush(System.Windows.Media.Color.FromRgb(30, 30, 30));
+        System.Windows.Media.Brush bd = (System.Windows.Media.Brush?)app?.TryFindResource("GhostBorderBrush")
+            ?? new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 212));
+        System.Windows.Media.Brush fg = (System.Windows.Media.Brush?)app?.TryFindResource("GhostTextBrush")
+            ?? new SolidColorBrush(System.Windows.Media.Color.FromRgb(221, 221, 221));
+
         var border = new Border
         {
             CornerRadius = new CornerRadius(6),
-            Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(30, 30, 30)),
-            BorderBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 212)),
+            Background = bg,
+            BorderBrush = bd,
             BorderThickness = new Thickness(1.5),
             Effect = new DropShadowEffect { BlurRadius = 10, Opacity = 0.6, ShadowDepth = 3, Color = Colors.Black },
         };
@@ -2468,7 +2482,7 @@ public partial class SelectorWindow : Window
         var title = new TextBlock
         {
             Text = cell.IsContainer ? $"{cell.Name}  {cell.CountBadge}" : cell.Name,
-            Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(221, 221, 221)),
+            Foreground = fg,
             FontSize = 11,
             TextAlignment = System.Windows.TextAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,

@@ -24,4 +24,11 @@
     <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 主题资源字典：保留为原始 XAML（不被编译成 BAML），
+         让 ThemeManager 能用 pack URI 按需加载 / 替换。 -->
+    <Resource Include="Themes\Dark.xaml" />
+    <Resource Include="Themes\Light.xaml" />
+  </ItemGroup>
+
 </Project>

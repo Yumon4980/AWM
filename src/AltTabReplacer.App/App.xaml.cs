@@ -31,6 +31,7 @@ public partial class App : System.Windows.Application
     private HotkeyService? _hotkey;
     private HostWindow? _hostWindow;
     private SelectorWindow? _selector;
+    private SettingsWindow? _settingsWindow;     // 单例：选择器多次点击不会叠加多个窗口
     private LowLevelKeyboardHook? _llHook;
     private DispatcherTimer? _hookWatchdog;
     private bool _hookWasInstalled = true;
@@ -79,6 +80,11 @@ public partial class App : System.Windows.Application
             // 2) 加载配置
             _settings = SettingsLoader.Load(SettingsLoader.DefaultPath);
             Logger.Info($"配置加载完成: {SettingsLoader.DefaultPath}");
+
+            // 2b) 初始化主题：监听系统主题变化，合并深色/淺色资源字典。
+            //     必须在任何 UI 窗口创建之前调用——不然控件找不到 DynamicResource 引用。
+            ThemeManager.Initialize();
+            ThemeManager.ApplyTheme(_settings.Theme.Mode);
 
             // 3) 加载规则
             _rulesPath = Path.Combine(
@@ -293,6 +299,9 @@ public partial class App : System.Windows.Application
         UpdateThumbnailsMenuLabel();      // 初始化"开 / 关"文字
         menu.Items.Add(_thumbnailsMenuItem);
 
+        // 设置从选择器标题栏搬到托盘菜单：用户随时右击托盘图标即可开
+        menu.Items.Add("设置...", null, (_, __) => OnSettingsRequested());
+
         menu.Items.Add(new WinForms.ToolStripSeparator());
         menu.Items.Add("退出", null, (_, __) =>
         {
@@ -424,6 +433,7 @@ public partial class App : System.Windows.Application
         _hookWatchdog = null;
         _hotkey?.Dispose();
         _hostWindow?.Close();
+        ThemeManager.Shutdown();
         base.OnExit(e);
     }
 
@@ -506,5 +516,35 @@ public partial class App : System.Windows.Application
         var doc = LayoutResolver.ToDocument(slots);
         _layoutStore.Save(doc);
         Logger.Info($"已持久化布局: {doc.Slots.Count} 个槽位");
+    }
+
+    /// <summary>
+    /// 托盘菜单"设置..."触发。单例设置窗口：未创建则造一个；已创建但最小化则恢复；已可见则抢前台。
+    /// 选择器与设置窗口现在是相互独立的——选择器不会被设置窗口关闭带走了。
+    /// </summary>
+    private void OnSettingsRequested()
+    {
+        if (_settings == null) return;
+
+        if (_settingsWindow == null || !_settingsWindow.IsLoaded)
+        {
+            _settingsWindow = new SettingsWindow(_settings);
+            _settingsWindow.Closed += (_, __) =>
+            {
+                _settingsWindow = null;
+            };
+        }
+        if (_settingsWindow.IsVisible)
+        {
+            // 已可见：抢前台，但不重新定位（避免连续点闪屏）
+            if (_settingsWindow.WindowState == WindowState.Minimized)
+                _settingsWindow.WindowState = WindowState.Normal;
+            _settingsWindow.Activate();
+        }
+        else
+        {
+            _settingsWindow.Show();
+        }
+        Logger.Info("打开设置窗口");
     }
 }

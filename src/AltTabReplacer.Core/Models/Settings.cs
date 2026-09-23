@@ -51,6 +51,13 @@ public sealed class Settings
         public string Accent { get; set; } = "#FF0078D4";
         public string Background { get; set; } = "#CC202020";
         public int CornerRadius { get; set; } = 8;
+
+        /// <summary>
+        /// 主题模式：跟随系统 / 浅色 / 深色。
+        /// 字段是新增的，旧 settings.json 没有时 JSON 反序列化会给 enum 默认值 0 = System，
+        /// 行为恰好等于"跟随系统"，所以无需迁移代码。
+        /// </summary>
+        public ThemeMode Mode { get; set; } = ThemeMode.System;
     }
 
     public sealed class BehaviorConfig
@@ -66,6 +73,18 @@ public sealed class Settings
         /// </summary>
         public bool ShowThumbnails { get; set; } = true;
     }
+}
+
+/// <summary>UI 主题模式。放在命名空间顶级（不在 Settings 里）以便 XAML 通过
+/// <c>clr-namespace:AltTabReplacer.Core.Models</c> 直接引用。</summary>
+public enum ThemeMode
+{
+    /// <summary>跟随 Windows 系统主题。</summary>
+    System = 0,
+    /// <summary>强制浅色。</summary>
+    Light = 1,
+    /// <summary>强制深色。</summary>
+    Dark = 2,
 }
 
 /// <summary>JSON 读写辅助。</summary>

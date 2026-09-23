@@ -1,0 +1,59 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- 浅色主题：白底深色字，蓝色高亮。 -->
+
+    <!-- 窗口 / 主面板背景 -->
+    <SolidColorBrush x:Key="WindowBackground"     Color="#E6FFFFFF"/>
+    <SolidColorBrush x:Key="PanelBackground"      Color="#FFF5F5F5"/>
+    <SolidColorBrush x:Key="PanelBackgroundAlt"   Color="#FFEAEAEA"/>
+    <SolidColorBrush x:Key="PanelBackgroundDeep"  Color="#FFFFFFFF"/>
+
+    <!-- 前景文字 -->
+    <SolidColorBrush x:Key="TextForeground"      Color="#FF000000"/>
+    <SolidColorBrush x:Key="TextForegroundDim"   Color="#FF666666"/>
+    <SolidColorBrush x:Key="TextForegroundMuted" Color="#FF999999"/>
+
+    <!-- 强调色 / 高亮（保持品牌蓝） -->
+    <SolidColorBrush x:Key="AccentBrush"         Color="#FF0078D4"/>
+    <SolidColorBrush x:Key="AccentBrushLight"    Color="#FF4CC2FF"/>
+    <SolidColorBrush x:Key="DropTargetBackground" Color="#FFD6EAF8"/>
+
+    <!-- 边框 / 分隔线 -->
+    <SolidColorBrush x:Key="BorderBrush"         Color="#FFD0D0D0"/>
+    <SolidColorBrush x:Key="BorderBrushStrong"   Color="#FFAAAAAA"/>
+
+    <!-- 控件专用 -->
+    <SolidColorBrush x:Key="InputBackground"     Color="#FFFFFFFF"/>
+    <SolidColorBrush x:Key="HoverBackground"     Color="#22000000"/>
+
+    <!-- 选择器专用：网格 / 溢出 / 搜索 / 面包屑 / 预览面板 -->
+    <SolidColorBrush x:Key="GroupAccentGreen"        Color="#FF4CC26A"/>
+    <SolidColorBrush x:Key="CellBackground"           Color="#FFFFFFFF"/>
+    <SolidColorBrush x:Key="CellBackgroundHover"      Color="#FFE8E8E8"/>
+    <SolidColorBrush x:Key="EmptyCellBackground"      Color="#FFF0F0F0"/>
+    <SolidColorBrush x:Key="OverflowPanelBackground"  Color="#FFFAFAFA"/>
+    <SolidColorBrush x:Key="SearchPanelBackground"    Color="#FFFFFFFF"/>
+    <SolidColorBrush x:Key="BreadcrumbBackground"     Color="#FFEAEAEA"/>
+    <SolidColorBrush x:Key="PreviewPanelBackground"   Color="#FFF5F5F5"/>
+
+    <!-- 选择器专用：文字色阶 -->
+    <SolidColorBrush x:Key="KeyLabelForeground"       Color="#FFFFFFFF"/>
+    <SolidColorBrush x:Key="KeyLabelForegroundEmpty"  Color="#FFAAAAAA"/>
+    <SolidColorBrush x:Key="SubtleForeground"         Color="#FF666666"/>
+    <SolidColorBrush x:Key="DimForeground"            Color="#FF999999"/>
+    <SolidColorBrush x:Key="HintForeground"           Color="#FFAAAAAA"/>
+    <SolidColorBrush x:Key="BadgeAccentForeground"    Color="#FF0078D4"/>
+    <SolidColorBrush x:Key="BadgeMutedForeground"     Color="#FF888888"/>
+    <SolidColorBrush x:Key="SelectionTitleForeground" Color="#FF333333"/>
+
+    <!-- 选择器专用：键标徽章背景 / 右键菜单 / 拖动 ghost / 占位预览 -->
+    <SolidColorBrush x:Key="BadgeBackground"          Color="#FF000000"/>
+    <SolidColorBrush x:Key="MenuBorderBrush"          Color="#FF0078D4"/>
+    <SolidColorBrush x:Key="GhostBorderBrush"         Color="#FF0078D4"/>
+    <SolidColorBrush x:Key="GhostBackgroundBrush"     Color="#FFFFFFFF"/>
+    <SolidColorBrush x:Key="GhostTextBrush"           Color="#FF202020"/>
+    <SolidColorBrush x:Key="IconPreviewBackground"    Color="#FFFFFFFF"/>
+    <SolidColorBrush x:Key="IconPreviewForeground"    Color="#FF888888"/>
+
+</ResourceDictionary>
