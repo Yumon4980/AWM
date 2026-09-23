@@ -29,8 +29,8 @@
 
     <!-- 选择器专用：网格 / 溢出 / 搜索 / 面包屑 / 预览面板 -->
     <SolidColorBrush x:Key="GroupAccentGreen"        Color="#FF4CC26A"/>
-    <SolidColorBrush x:Key="CellBackground"           Color="#FFFFFFFF"/>
-    <SolidColorBrush x:Key="CellBackgroundHover"      Color="#FFE8E8E8"/>
+    <SolidColorBrush x:Key="CellBackground"           Color="#FFE8E8E8"/>
+    <SolidColorBrush x:Key="CellBackgroundHover"      Color="#FFD8D8D8"/>
     <SolidColorBrush x:Key="EmptyCellBackground"      Color="#FFF0F0F0"/>
     <SolidColorBrush x:Key="OverflowPanelBackground"  Color="#FFFAFAFA"/>
     <SolidColorBrush x:Key="SearchPanelBackground"    Color="#FFFFFFFF"/>

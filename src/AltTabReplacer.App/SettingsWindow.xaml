@@ -148,11 +148,20 @@
                             <TextBlock Grid.Column="0" Style="{StaticResource FieldLabel}" Text="主题模式"/>
                             <ComboBox Grid.Column="1"
                                       Style="{StaticResource FieldInput}"
+                                      Foreground="{DynamicResource TextForeground}"
                                       SelectedItem="{Binding ThemeMode, Mode=TwoWay}"
                                       HorizontalAlignment="Stretch">
+                                <ComboBox.ItemContainerStyle>
+                                    <!-- 弹出下拉项在独立的 Popup 视觉树里，ComboBox 的 Foreground 不会自动继承，必须显式指定 -->
+                                    <Style TargetType="ComboBoxItem">
+                                        <Setter Property="Foreground" Value="{DynamicResource TextForeground}"/>
+                                        <Setter Property="Background" Value="{DynamicResource InputBackground}"/>
+                                    </Style>
+                                </ComboBox.ItemContainerStyle>
                                 <ComboBox.ItemTemplate>
                                     <DataTemplate>
-                                        <TextBlock Text="{Binding Converter={StaticResource ThemeModeToText}}"/>
+                                        <TextBlock Text="{Binding Converter={StaticResource ThemeModeToText}}"
+                                                   Foreground="{DynamicResource TextForeground}"/>
                                     </DataTemplate>
                                 </ComboBox.ItemTemplate>
                                 <models:ThemeMode>System</models:ThemeMode>
