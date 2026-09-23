@@ -59,6 +59,12 @@ public partial class App : System.Windows.Application
             args.Handled = true;
         };
 
+        // 托盘菜单是 WinForms 控件：它的事件处理器里抛的异常不会经过
+        // DispatcherUnhandledException，默认弹 ThreadExceptionDialog 且不留日志。
+        // 这里统一记日志并吞掉，与上面 WPF 的兜底保持一致。
+        WinForms.Application.ThreadException += (_, e) =>
+            Logger.Error("WinForms 事件异常（已拦截，程序继续运行）", e.Exception);
+
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
         {
             if (args.ExceptionObject is Exception ex)
@@ -476,7 +482,12 @@ public partial class App : System.Windows.Application
             // 抢前台统一放在 Show() 之后、直接作用在选择器上（AttachThreadInput 本来就不依赖
             // 本进程当前是不是前台）。
             _selector = new SelectorWindow(windows, slots, _capture!, _settings!);
-            _selector.Closed += (_, __) => { _selectorActive = false; _suspendIndexCapture = false; };
+            _selector.Closed += (_, __) =>
+            {
+                _selectorActive = false;
+                _suspendIndexCapture = false;
+                _selector = null;   // 已关闭的窗口不能再被引用（其 HwndSource 已销毁）
+            };
             _selector.LayoutChanged += OnSelectorLayoutChanged;
             _selector.SuspendIndexCaptureChanged += on => _suspendIndexCapture = on;
             _selectorActive = true;

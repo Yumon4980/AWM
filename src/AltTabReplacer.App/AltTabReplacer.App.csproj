@@ -9,8 +9,14 @@
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <RootNamespace>AltTabReplacer</RootNamespace>
-    <AssemblyName>AltTabReplacer</AssemblyName>
+    <RootNamespace>AWM</RootNamespace>
+    <!-- 生成程序名（不含扩展名）：最终产物为 <AssemblyName>.exe -->
+    <AssemblyName>AWM</AssemblyName>
+    <!-- 在文件资源管理器中显示的产品名（可选） -->
+    <ProductName>AWM</ProductName>
+    <AssemblyTitle>AWM</AssemblyTitle>
+    <!-- 输出路径：相对 csproj 的目录。默认值是 bin\$(Configuration)\net8.0-windows\ -->
+    <OutputPath>C:\01-app\AWM</OutputPath>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\AWM.ico</ApplicationIcon>
     <NoWarn>$(NoWarn);CS8002</NoWarn>

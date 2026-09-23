@@ -51,7 +51,11 @@ Write-Host ''
 # also works while an elevated window is in the foreground.
 # `dotnet run` cannot be used: it launches via CreateProcess, which cannot elevate
 # and fails with error 740. Start the exe with -Verb RunAs so UAC can kick in.
-$exe = Join-Path $root 'src\AltTabReplacer.App\bin\Debug\net8.0-windows\AltTabReplacer.exe'
+# 与 csproj 中的 <AssemblyName>/<OutputPath>/<TargetFramework> 保持一致：
+#   <OutputPath>C:\01-app\AWM</OutputPath>
+#   <TargetFramework>net8.0-windows</TargetFramework>
+#   <AssemblyName>AWM</AssemblyName>
+$exe = 'C:\01-app\AWM\net8.0-windows\AWM.exe'
 if (-not (Test-Path -LiteralPath $exe)) {
     Write-Host "  executable not found: $exe" -ForegroundColor Red
     exit 1

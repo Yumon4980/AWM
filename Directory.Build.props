@@ -1,0 +1,13 @@
+<Project>
+  <PropertyGroup>
+    <!--
+      把 obj/ 中间产物统一到 build/obj/<ProjectName>/。
+      排除 wpftmp：WPF temp 子项目以自己的 MSBuildProjectName（带随机后缀）被
+      重新求值，会去 build/obj/<App>_<rand>_wpftmp/ 找 assets，但那里没生成。
+      排除后 wpftmp 回退到默认 obj\，WPF 自身会把 props/targets 从主项目
+      MSBuildProjectExtensionsPath 复制到 wpftmp 自己的位置。
+    -->
+    <MSBuildProjectExtensionsPath
+        Condition="'$(MSBuildProjectName)' != '' AND !$(MSBuildProjectName.Contains(`wpftmp`))">..\..\build\obj\$(MSBuildProjectName)\</MSBuildProjectExtensionsPath>
+  </PropertyGroup>
+</Project>

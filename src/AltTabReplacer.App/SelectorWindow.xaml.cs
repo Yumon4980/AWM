@@ -176,8 +176,9 @@ public partial class SelectorWindow : Window
         if (screen == null) return;
 
         var wa = screen.WorkingArea;
-        var m = ((System.Windows.Interop.HwndSource)PresentationSource.FromVisual(this)!)
-            .CompositionTarget!.TransformFromDevice;
+        // 窗口已关闭 / 尚未初始化时 FromVisual 返回 null——直接放弃，不要 NRE
+        if (PresentationSource.FromVisual(this) is not System.Windows.Interop.HwndSource source) return;
+        var m = source.CompositionTarget!.TransformFromDevice;
 
         var origin = m.Transform(new System.Windows.Point(wa.Left, wa.Top));
         var extent = m.Transform(new System.Windows.Vector(wa.Width, wa.Height));
@@ -616,6 +617,8 @@ public partial class SelectorWindow : Window
     /// </summary>
     public void RefreshPreview()
     {
+        // 窗口已关闭时 HwndSource 已销毁，动几何 / 预览都会 NRE
+        if (!IsLoaded) return;
         ApplyPreviewVisibility();
         if (!_everActivated) return;
         UpdatePreview();
@@ -678,8 +681,9 @@ public partial class SelectorWindow : Window
         var screen = System.Windows.Forms.Screen.PrimaryScreen;
         if (screen == null) return;
         var wa = screen.WorkingArea;
-        var m = ((System.Windows.Interop.HwndSource)PresentationSource.FromVisual(this)!)
-            .CompositionTarget!.TransformFromDevice;
+        // 窗口已关闭 / 尚未初始化时 FromVisual 返回 null——直接放弃，不要 NRE
+        if (PresentationSource.FromVisual(this) is not System.Windows.Interop.HwndSource source) return;
+        var m = source.CompositionTarget!.TransformFromDevice;
         var origin = m.Transform(new System.Windows.Point(wa.Left, wa.Top));
         var extent = m.Transform(new System.Windows.Vector(wa.Width, wa.Height));
         CenterOnScreen(origin, extent);
