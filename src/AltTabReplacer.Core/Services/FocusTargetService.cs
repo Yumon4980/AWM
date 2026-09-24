@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Windows.Automation;
 using System.Windows.Threading;
 using AltTabReplacer.Core.Infrastructure;
@@ -219,8 +220,56 @@ public sealed class FocusTargetService
             Logger.Info($"跳过聚焦 ({entry.Process})：窗口已不是前台");
             return;
         }
+
+        // Chromium/Electron 系应用（ZCode、浏览器等）的输入法候选框位置由应用在真实
+        // 输入事件后向系统上报；UIA SetFocus 不触发这个上报，打字时输入法框会飘到
+        // 屏幕角落而不是光标处。元素是输入类控件时，改为在其中心模拟一次真实左键
+        // 点击——与应用被用户亲手点一下完全等价，焦点和输入法位置都由应用自然处理。
+        // 非输入类（误捕的 Document/Group 等）退回 SetFocus：点它们中心可能误触页面上
+        // 的任意元素。
+        if ((entry.ControlTypeId == ControlType.Edit.Id || entry.ControlTypeId == ControlType.ComboBox.Id)
+            && TryClickCenter(el, hwnd, out var cx, out var cy))
+        {
+            Logger.Info($"已聚焦输入框 ({entry.Process}，模拟点击({cx},{cy})，按{clue})");
+            return;
+        }
+
         el.SetFocus();
         Logger.Info($"已聚焦输入框 ({entry.Process}，按{clue})");
+    }
+
+    /// <summary>
+    /// 在元素中心模拟一次左键点击。点击点必须落在目标窗口当前矩形内——Chromium 的
+    /// 隐藏元素可能报出离屏/越界矩形，乱点会碰到"显示桌面"之类的系统热区
+    /// （实测表现为所有窗口被最小化）。校验失败返回 false，调用方退回 SetFocus。
+    /// </summary>
+    private static bool TryClickCenter(AutomationElement el, IntPtr hwnd, out int cx, out int cy)
+    {
+        cx = cy = -1;
+        try
+        {
+            var r = el.Current.BoundingRectangle;
+            if (r.IsEmpty || !double.IsFinite(r.X) || !double.IsFinite(r.Y)
+                || !double.IsFinite(r.Width) || !double.IsFinite(r.Height)
+                || r.Width < 8 || r.Height < 8) return false;
+
+            if (!GetWindowRect(hwnd, out var wr)) return false;
+            cx = (int)(r.X + r.Width / 2);
+            cy = (int)(r.Y + r.Height / 2);
+            // 2px 容差；越界即视为脏数据
+            if (cx < wr.L - 2 || cx > wr.R + 2 || cy < wr.T - 2 || cy > wr.B + 2) return false;
+
+            if (!SetCursorPos(cx, cy)) return false;
+            Thread.Sleep(30);   // 让光标移动先生效
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+            Thread.Sleep(20);
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -303,6 +352,27 @@ public sealed class FocusTargetService
     }
 
     private static string? NullIfEmpty(string? s) => string.IsNullOrWhiteSpace(s) ? null : s;
+
+    private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+
+    [DllImport("user32.dll")]
+    private static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    private static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Win32Rect
+    {
+        public int L;
+        public int T;
+        public int R;
+        public int B;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out Win32Rect lpRect);
 
     private static string? Truncate(string? s)
     {

@@ -648,10 +648,37 @@ public static class LayoutResolver
         // 破坏"一个槽位对应一个具体窗口"的语义。锁定只精确 / 按句柄认领。
         WindowInfo? w = exact.TryGetValue(spec, out var e) && e != null
             ? e
-            : strict ? null : TakeBestMatch(remaining, spec);
+            : strict ? StrictClaim(remaining, spec) : TakeBestMatch(remaining, spec);
 
         // 回填句柄提示：同一次运行的后续解析据此精确认领（标题再变也不丢）。
         if (w != null && spec.Hwnd != (long)w.Hwnd) spec.Hwnd = (long)w.Hwnd;
+        return w;
+    }
+
+    /// <summary>
+    /// 锁定成员的"标题变了"兜底。浏览器等应用的窗口标题随内容变化，程序重启后 hwnd 提示
+    /// （按设计不落盘）失效、标题精确匹配也失败，之前直接判"已关闭"变成占位，真窗口却被
+    /// 当成新窗口另立一格（用户实测：zen 浏览器换标签页后锁定槽位变已关闭 + 多出一个新槽）。
+    ///
+    /// 现在按"标题公共后缀 &gt; 0"认领同进程窗口——同一窗口改名的典型特征是旧标题为现标题的
+    /// 尾部（'Zen Browser' → '新标签 — Zen Browser'）。后缀为 0 的一律不认，保持 strict 的
+    /// 防误吸收语义：真窗口确实已关时，不把同进程无关窗口（explorer 主页等）吸进槽位。
+    /// </summary>
+    private static WindowInfo? StrictClaim(List<WindowInfo> remaining, MemberSpec spec)
+    {
+        int best = -1, bestScore = 0;
+        for (int i = remaining.Count - 1; i >= 0; i--)
+        {
+            if (!string.Equals(remaining[i].ProcessName, spec.Process, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (string.IsNullOrEmpty(spec.Title)) continue;   // 没有可比较的标题提示，保持占位
+            int score = CommonSuffixLength(spec.Title, remaining[i].Title);
+            if (score > bestScore) { bestScore = score; best = i; }
+        }
+
+        if (best < 0 || bestScore <= 0) return null;
+        var w = remaining[best];
+        remaining.RemoveAt(best);
         return w;
     }
 
