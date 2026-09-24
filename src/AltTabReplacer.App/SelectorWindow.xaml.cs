@@ -30,6 +30,12 @@ public partial class SelectorWindow : Window
     private readonly SelectorViewModel _vm = new();
     private readonly IReadOnlyList<WindowInfo> _rawWindows;
     private readonly WindowActivator _activator;
+
+    /// <summary>
+    /// "切换后聚焦输入框"服务。App 注入；null = 功能关闭。
+    /// 选择器失焦到某个窗口时，把它视为切换目标并聚焦其录制的输入框。
+    /// </summary>
+    public FocusTargetService? FocusTargets { get; set; }
     private readonly WindowCaptureService _capture;
     private readonly Settings _settings;
 
@@ -98,14 +104,16 @@ public partial class SelectorWindow : Window
     public event Action<bool>? SuspendIndexCaptureChanged;
 
     public SelectorWindow(IReadOnlyList<WindowInfo> windows, IReadOnlyList<ResolvedSlot> slots,
-        WindowCaptureService capture, Settings settings)
+        WindowCaptureService capture, Settings settings, WindowActivator activator)
     {
         InitializeComponent();
         DataContext = _vm;
 
         _rawWindows = windows;
         _topSlots = slots;
-        _activator = new WindowActivator();
+        // 用 App 的激活器实例：它带着"切换后聚焦输入框"的服务。
+        // 自己 new 一个的话服务是空的，聚焦会被 ??. 静默跳过（实测踩过）。
+        _activator = activator;
         _capture = capture;
         _settings = settings;
 
@@ -135,12 +143,51 @@ public partial class SelectorWindow : Window
 
         Deactivated += (_, __) =>
         {
+            if (_closing) return;               // 主动切换中的失焦是正常路径，不是"被抢走"
             if (!_everActivated) return;
             if (_suppressAutoClose) return;     // 菜单/对话框导致的失焦，不是用户切走了
-            Logger.Info("选择器失焦，自动关闭");
+
+            // 失焦 = 用户点了/切到了另一个窗口：把它当作切换目标，聚焦其录制的输入框后关闭。
+            // 这样"热键 → 直接点目标窗口"和"热键 → 索引键"两条路都有输入框聚焦。
+            var fg = GetForegroundWindow();
+            if (fg != IntPtr.Zero && !IsOwnWindow(fg))
+            {
+                GetWindowThreadProcessId(fg, out var pid);
+                var titleSb = new System.Text.StringBuilder(512);
+                _ = GetWindowText(fg, titleSb, 512);
+                string proc = "未知进程";
+                try
+                {
+                    using var p = System.Diagnostics.Process.GetProcessById((int)pid);
+                    proc = p.ProcessName;
+                }
+                catch (Exception) { /* 进程恰好退出 */ }
+
+                Logger.Info($"选择器失焦：视为切换到 {proc}，聚焦其录入的输入框");
+                FocusTargets?.BeginApply(new WindowInfo(fg, titleSb.ToString(), proc, (int)pid, false));
+            }
+            else
+            {
+                Logger.Info("选择器失焦，自动关闭");
+            }
             Cancel();
         };
     }
+
+    private static bool IsOwnWindow(IntPtr hwnd)
+    {
+        GetWindowThreadProcessId(hwnd, out var pid);
+        return pid == Environment.ProcessId;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
     // ----------------------------------------------------------
     //  窗口几何 / 系统菜单
@@ -243,7 +290,7 @@ public partial class SelectorWindow : Window
             if (line.Length > 0) rows.Add(line.ToString());
         }
         string keys = string.Join("/", rows);
-        PART_Hint.Text = $"{keys} 选网格 · 方向键移动 · Enter 确认 · / 搜索 · Esc 返回 · 拖到格中=并入，拖到边缘=排序";
+        PART_Hint.Text = $"{keys} 选网格 · 方向键移动 · Enter 确认 · / 搜索 · Esc 返回 · Ctrl+W 关未锁定 · 拖到格中=并入，拖到边缘=排序";
     }
 
     // ----------------------------------------------------------
@@ -800,6 +847,15 @@ public partial class SelectorWindow : Window
                     return;
                 }
                 break;
+
+            case Key.W:                         // Ctrl+W：关闭全部未锁定的程序
+                if ((Keyboard.Modifiers & ModifierKeys.Control) != 0)
+                {
+                    e.Handled = true;
+                    CloseAllUnlocked();
+                    return;
+                }
+                break;
         }
 
         // 其余 Alt+键一律吃掉，否则 DefWindowProc 会去激活窗口菜单并抢走焦点
@@ -1086,6 +1142,110 @@ public partial class SelectorWindow : Window
         if (_closing) return;
         _closing = true;
         Close();
+    }
+
+    /// <summary>
+    /// Ctrl+W：给所有未锁定槽位里的活窗口发 WM_CLOSE（与右键"关闭程序"同一机制，
+    /// 目标程序自己决定怎么响应——可能弹保存提示）。锁定槽位 / 组内单独锁定的成员原样保留。
+    /// 关完就地重建视图：被关的未锁定槽位从列表消失。**不落盘**——布局定义没变，
+    /// 下次唤起按实际窗口重新解析，被关的程序自然不再出现。
+    /// </summary>
+    private void CloseAllUnlocked()
+    {
+        var targets = CollectUnlockWindows(_topSlots);
+        if (targets.Count == 0)
+        {
+            Logger.Info("Ctrl+W：没有可关闭的未锁定窗口");
+            return;
+        }
+
+        Logger.Info($"Ctrl+W：关闭 {targets.Count} 个未锁定窗口");
+        foreach (var w in targets)
+            PostMessage(w.Hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+
+        var kept = new List<ResolvedSlot>();
+        StripUnlockedForCloseAll(_topSlots, kept);
+        _topSlots = kept;
+        foreach (var s in _topSlots)
+            if (!s.Locked && s.Position is >= 0) s.Position = null;   // 未锁定槽位重新自动补位
+
+        // 大批量关闭后回到一级，别停在可能已被清空的二级里
+        _openGroup = null;
+        _openGroupIndex = -1;
+        _vm.Level = SelectorLevel.Top;
+        _vm.Breadcrumb = "";
+        BuildRows(_topSlots);
+    }
+
+    /// <summary>
+    /// 收集"未锁定"的活窗口：跳过锁定槽位（整格保护），跳过组内单独锁定的成员
+    /// （<see cref="MemberSpec.Locked"/>，自动折叠组的成员锁定就存放在这里）。
+    /// Hwnd=0 的"未运行"占位没有窗口可关，自然不在名单里。
+    /// </summary>
+    private static List<WindowInfo> CollectUnlockWindows(IReadOnlyList<ResolvedSlot> slots)
+    {
+        var result = new List<WindowInfo>();
+        Collect(slots, result);
+        return result;
+
+        static void Collect(IReadOnlyList<ResolvedSlot> slots, List<WindowInfo> acc)
+        {
+            foreach (var s in slots)
+            {
+                if (s.Locked) continue;                    // 锁定槽位整格保护
+                if (s.Children != null) { Collect(s.Children, acc); continue; }
+
+                for (int i = 0; i < s.Windows.Count; i++)
+                {
+                    var w = s.Windows[i];
+                    if (w.Hwnd == IntPtr.Zero) continue;
+                    if (s.Members is { Count: > 0 } && i < s.Members.Count && s.Members[i].Locked)
+                        continue;                          // 组内单独锁定的成员不动
+                    acc.Add(w);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 从槽位树里去掉刚被 Ctrl+W 关掉的未锁定部分：
+    ///   未锁定的程序 / 程序组合 / 没有锁定成员的自动组 → 整格移除；
+    ///   手工程序组 → 移除未锁定子项后保留（空组也显示，与手工组语义一致）；
+    ///   有单独锁定成员的自动组 → 只留锁定成员的窗口。
+    /// 锁定槽位原样保留。
+    /// </summary>
+    private static void StripUnlockedForCloseAll(IReadOnlyList<ResolvedSlot> slots, List<ResolvedSlot> acc)
+    {
+        foreach (var s in slots)
+        {
+            if (s.Locked) { acc.Add(s); continue; }
+
+            if (s.Children != null)
+            {
+                var children = new List<ResolvedSlot>();
+                StripUnlockedForCloseAll(s.Children, children);
+                acc.Add(s.WithChildren(children));     // WithChildren 会按子项重算展平窗口
+                continue;
+            }
+
+            if (s.Members is { Count: > 0 } ms && ms.Any(m => m.Locked))
+            {
+                // 只保留锁定成员。Windows / Members 必须同步裁剪，否则 UI 按
+                // Windows[i] ↔ Members[i] 对齐取图标 / 显示名时会错位
+                var windows = new List<WindowInfo>();
+                var members = new List<MemberSpec>();
+                for (int i = 0; i < s.Windows.Count && i < ms.Count; i++)
+                {
+                    if (!ms[i].Locked) continue;
+                    windows.Add(s.Windows[i]);
+                    members.Add(ms[i]);
+                }
+                acc.Add(s.WithWindows(windows).WithLaunch(s.LaunchPath, members));
+                continue;
+            }
+
+            // 其余未锁定槽位：窗口已全部发出关闭，整格移除（不进 acc）
+        }
     }
 
     // ----------------------------------------------------------

@@ -72,6 +72,12 @@ public sealed class Settings
         /// 适合截图功能有问题或性能不受限制的场景。
         /// </summary>
         public bool ShowThumbnails { get; set; } = true;
+
+        /// <summary>
+        /// 切换程序后自动把键盘焦点移到该程序录制的输入框（配置见 focus_targets.json）。
+        /// 只影响录过输入框的进程，未录制的程序行为不变，所以默认开。
+        /// </summary>
+        public bool FocusInputAfterSwitch { get; set; } = true;
     }
 }
 

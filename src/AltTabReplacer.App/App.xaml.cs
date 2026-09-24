@@ -25,6 +25,8 @@ public partial class App : System.Windows.Application
     private RuleStore? _ruleStore;
     private RuleEngine? _ruleEngine;
     private LayoutStore? _layoutStore;
+    private FocusTargetStore? _focusTargetStore;
+    private FocusTargetService? _focusTargets;
     private WindowEnumerator? _enumerator;
     private WindowActivator? _activator;
     private WindowCaptureService? _capture;
@@ -132,7 +134,15 @@ public partial class App : System.Windows.Application
 
         // 服务装配
         _ruleEngine = new RuleEngine(_ruleStore!);
-        _activator = new WindowActivator();
+
+        // "切换后聚焦输入框"：先于 WindowActivator 装配（激活器要在切换后调用它）。
+        // 所有 UIA 调用固定走 UI 线程（见 FocusTargetService 的线程模型说明）。
+        _focusTargetStore = new FocusTargetStore(FocusTargetStore.DefaultPath);
+        _focusTargetStore.Load();
+        _focusTargets = new FocusTargetService(_focusTargetStore,
+            () => _settings!.Behavior.FocusInputAfterSwitch, Dispatcher);
+
+        _activator = new WindowActivator(_focusTargets);
         _capture = new WindowCaptureService();
 
         // 宿主窗口
@@ -481,7 +491,7 @@ public partial class App : System.Windows.Application
             // 既要 SW_SHOW 一个本该隐藏的窗口，又会把已打开的选择器挤失焦触发自动关闭。
             // 抢前台统一放在 Show() 之后、直接作用在选择器上（AttachThreadInput 本来就不依赖
             // 本进程当前是不是前台）。
-            _selector = new SelectorWindow(windows, slots, _capture!, _settings!);
+            _selector = new SelectorWindow(windows, slots, _capture!, _settings!, _activator!);
             _selector.Closed += (_, __) =>
             {
                 _selectorActive = false;
@@ -490,6 +500,7 @@ public partial class App : System.Windows.Application
             };
             _selector.LayoutChanged += OnSelectorLayoutChanged;
             _selector.SuspendIndexCaptureChanged += on => _suspendIndexCapture = on;
+            _selector.FocusTargets = _focusTargets;   // 失焦到某窗口时聚焦其录入的输入框
             _selectorActive = true;
             _selector.Show();
 
@@ -539,7 +550,7 @@ public partial class App : System.Windows.Application
 
         if (_settingsWindow == null || !_settingsWindow.IsLoaded)
         {
-            _settingsWindow = new SettingsWindow(_settings);
+            _settingsWindow = new SettingsWindow(_settings, _focusTargets!);
             _settingsWindow.Closed += (_, __) =>
             {
                 _settingsWindow = null;

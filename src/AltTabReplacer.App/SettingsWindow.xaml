@@ -158,6 +158,82 @@
             </Setter>
         </Style>
 
+        <!-- 按钮字段：主题画刷，深浅两色都成立（默认按钮模板是硬编码白底） -->
+        <Style x:Key="FieldButton" TargetType="Button">
+            <Setter Property="Background" Value="{DynamicResource InputBackground}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextForeground}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrushStrong}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="12,5"/>
+            <Setter Property="MinHeight" Value="28"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="3"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource HoverBackground}"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource AccentBrushLight}"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource AccentBrush}"/>
+                                <Setter Property="Foreground" Value="White"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 复选框：默认模板的勾选框是硬编码白底，深色模式下突兀，整体替换 -->
+        <Style x:Key="FieldCheck" TargetType="CheckBox">
+            <Setter Property="Foreground" Value="{DynamicResource TextForeground}"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <StackPanel Orientation="Horizontal" Background="Transparent">
+                            <Border x:Name="Box"
+                                    Width="16" Height="16"
+                                    Background="{DynamicResource InputBackground}"
+                                    BorderBrush="{DynamicResource BorderBrushStrong}"
+                                    BorderThickness="1"
+                                    CornerRadius="3"
+                                    VerticalAlignment="Center">
+                                <Path x:Name="Check"
+                                      Data="M 3 8 L 6.5 11.5 L 13 4.5"
+                                      Stroke="{DynamicResource TextForeground}"
+                                      StrokeThickness="2"
+                                      Visibility="Collapsed"
+                                      Stretch="None"
+                                      HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <ContentPresenter Margin="8,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Check" Property="Visibility" Value="Visible"/>
+                                <Setter TargetName="Box" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Box" Property="BorderBrush" Value="{DynamicResource AccentBrushLight}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
     </Window.Resources>
 
     <Grid>
@@ -280,8 +356,107 @@
                                    Text="「跟随系统主题」会读取 Windows 的深色/浅色设置，系统切换时自动跟随。"/>
                     </StackPanel>
 
+                    <!-- 输入框聚焦面板 -->
+                    <StackPanel Visibility="{Binding IsFocusSelected, Converter={StaticResource BoolToVis}}">
+                        <TextBlock Style="{StaticResource PanelTitle}" Text="输入框聚焦"/>
+
+                        <CheckBox Style="{StaticResource FieldCheck}"
+                                  Content="切换程序后自动聚焦到该程序录制的输入框"
+                                  IsChecked="{Binding FocusAfterSwitch, Mode=TwoWay}"
+                                  Margin="0,0,0,8"/>
+
+                        <TextBlock Foreground="{DynamicResource TextForegroundMuted}"
+                                   FontSize="11"
+                                   TextWrapping="Wrap"
+                                   Text="录制后，每次切到该程序，键盘焦点会直接落到输入框上（浏览器地址栏、搜索框等）。对自绘界面（游戏）和以管理员运行的程序可能无效。"
+                                   Margin="0,0,0,16"/>
+
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                            <Button Style="{StaticResource FieldButton}"
+                                    Content="捕获输入框…"
+                                    Click="OnCaptureFocusTarget"/>
+                        </StackPanel>
+
+                        <ListBox ItemsSource="{Binding FocusTargetRows}"
+                                 Background="Transparent"
+                                 BorderThickness="0"
+                                 HorizontalContentAlignment="Stretch"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 Margin="0,0,0,8">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="Background" Value="Transparent"/>
+                                    <Setter Property="Padding" Value="0"/>
+                                    <Setter Property="Margin" Value="0,2"/>
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                    <Setter Property="Focusable" Value="False"/>
+                                    <Setter Property="Template">
+                                        <Setter.Value>
+                                            <ControlTemplate TargetType="ListBoxItem">
+                                                <Border Background="{DynamicResource CellBackground}"
+                                                        CornerRadius="4"
+                                                        Padding="12,8">
+                                                    <ContentPresenter/>
+                                                </Border>
+                                            </ControlTemplate>
+                                        </Setter.Value>
+                                    </Setter>
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding Process}"
+                                                       FontSize="13" FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource TextForeground}"/>
+                                            <TextBlock FontSize="11"
+                                                       Foreground="{DynamicResource TextForegroundDim}"
+                                                       TextWrapping="Wrap">
+                                                <Run Text="{Binding Description, Mode=OneWay}"/>
+                                                <Run Text="{Binding CapturedAt, Mode=OneWay}"
+                                                     Foreground="{DynamicResource TextForegroundMuted}"/>
+                                            </TextBlock>
+                                        </StackPanel>
+                                        <Button Grid.Column="1"
+                                                Style="{StaticResource FieldButton}"
+                                                Content="删除"
+                                                Padding="10,3"
+                                                Command="{Binding Delete}"
+                                                VerticalAlignment="Center"/>
+                                    </Grid>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+
+                        <TextBlock Foreground="{DynamicResource TextForegroundMuted}"
+                                   FontSize="12"
+                                   TextWrapping="Wrap"
+                                   Visibility="{Binding HasFocusTargets, Converter={StaticResource BoolToVis}, ConverterParameter=invert}"
+                                   Text="还没有录制。点上方按钮后，在目标程序里点一下要聚焦的输入框即可（每个程序录一条，重复录制会覆盖）。"/>
+                    </StackPanel>
+
+                    <!-- 行为面板 -->
+                    <StackPanel Visibility="{Binding IsBehaviorSelected, Converter={StaticResource BoolToVis}}">
+                        <TextBlock Style="{StaticResource PanelTitle}" Text="行为"/>
+
+                        <CheckBox Style="{StaticResource FieldCheck}"
+                                  Content="选择器失焦时自动关闭"
+                                  IsChecked="{Binding HideSelectorOnDeactivate, Mode=TwoWay}"
+                                  Margin="0,0,0,8"/>
+
+                        <TextBlock Foreground="{DynamicResource TextForegroundMuted}"
+                                   FontSize="11"
+                                   TextWrapping="Wrap"
+                                   Text="关闭后，其他窗口抢走前台时选择器保持常驻，索引键照常可用（按键走全局钩子，不依赖窗口焦点）。如果你的应用（如 ZCode 等流式更新的应用）会抢前台，导致选择器刚弹出就被关闭、切换无法完成，请关闭此开关。"/>
+                    </StackPanel>
+
                     <!-- 其他分类占位 -->
-                    <StackPanel Visibility="{Binding IsThemeSelected, Converter={StaticResource BoolToVis}, ConverterParameter=invert}">
+                    <StackPanel Visibility="{Binding IsGenericSelected, Converter={StaticResource BoolToVis}}">
                         <TextBlock Style="{StaticResource PanelTitle}"
                                    Text="{Binding Selected.Title}"/>
                         <TextBlock Foreground="{DynamicResource TextForegroundMuted}"

@@ -285,7 +285,7 @@
                     <!-- 底部操作提示：键位列由 KeyMap.LabelOf 动态生成（"1234/QWER/ASDF/ZXCV" 由 R×C 决定） -->
                     <TextBlock x:Name="PART_Hint" DockPanel.Dock="Bottom" Margin="2,8,0,0"
                                Foreground="{DynamicResource HintForeground}" FontSize="10"
-                               Text="选网格 · 方向键移动 · Enter 确认 · / 搜索 · Esc 返回 · 拖到格中=并入，拖到边缘=排序"/>
+                               Text="选网格 · 方向键移动 · Enter 确认 · / 搜索 · Esc 返回 · Ctrl+W 关未锁定 · 拖到格中=并入，拖到边缘=排序"/>
 
                     <!-- 未入网格列表 | 4×4 网格。DropLayer 覆盖两者，插入线定位转到共同祖先 PART_DropHost -->
                     <Grid x:Name="PART_DropHost">

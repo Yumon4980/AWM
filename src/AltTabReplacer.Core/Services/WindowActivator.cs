@@ -13,6 +13,13 @@ namespace AltTabReplacer.Core.Services;
 /// </summary>
 public sealed class WindowActivator
 {
+    private readonly FocusTargetService? _focusTargets;
+
+    public WindowActivator(FocusTargetService? focusTargets = null)
+    {
+        _focusTargets = focusTargets;
+    }
+
     /// <summary>
     /// 打开一个程序组合：按成员顺序，已开则激活、未开则用 exe 启动。
     /// 同进程只激活/启动一次（Members 可能多 ref 对应同一进程）。
@@ -25,13 +32,20 @@ public sealed class WindowActivator
         var matchedProcs = new System.Collections.Generic.HashSet<string>(
             StringComparer.OrdinalIgnoreCase);
         var activatedHwnds = new System.Collections.Generic.HashSet<IntPtr>();
+        WindowInfo? lastActivated = null;
         foreach (var w in combo.Windows)
         {
             matchedProcs.Add(w.ProcessName);
             if (!activatedHwnds.Add(w.Hwnd)) continue;
-            try { Activate(w); }
+            try
+            {
+                // 输入框聚焦只做在**最后激活**的那个窗口上：中间成员做了也会被后面的
+                // 激活顶掉，而对非前台窗口 SetFocus 反而会把它顶回前台、打乱组合次序
+                if (ActivateCore(w, applyFocus: false)) lastActivated = w;
+            }
             catch (Exception ex) { Logger.Error($"激活失败: {ex.Message}"); }
         }
+        if (lastActivated != null) _focusTargets?.BeginApply(lastActivated);
 
         // 未开的启动：同进程只启动一次（Members 可能多 ref 对应同一进程）
         var launchedProcs = new System.Collections.Generic.HashSet<string>(
@@ -104,9 +118,13 @@ public sealed class WindowActivator
         }
     }
 
-    public void Activate(WindowInfo target)
+    /// <summary>激活窗口；成功成为前台后按配置聚焦录制的输入框。</summary>
+    public void Activate(WindowInfo target) => ActivateCore(target, applyFocus: true);
+
+    /// <summary>激活并返回是否真的成了前台窗口（决定输入框聚焦做不做）。</summary>
+    private bool ActivateCore(WindowInfo target, bool applyFocus)
     {
-        if (target.Hwnd == IntPtr.Zero) return;
+        if (target.Hwnd == IntPtr.Zero) return false;
 
         // 1) 解锁：让目标进程能成为前台
         AllowSetForegroundWindow((uint)target.ProcessId);
@@ -145,7 +163,15 @@ public sealed class WindowActivator
         if (GetForegroundWindow() != target.Hwnd)
         {
             Logger.Error($"无法激活窗口: {target.Title} (HWND=0x{target.Hwnd:X})");
+            return false;
         }
+
+        Logger.Info($"已切换: {target.ProcessName}（{target.Title}）");
+
+        // 激活成功后再聚焦输入框：切窗动作本身不能被 UIA 树查找（几十到几百毫秒）拖慢，
+        // BeginApply 内部异步执行。聚焦失败只记日志，不影响切换本身。
+        if (applyFocus) _focusTargets?.BeginApply(target);
+        return true;
     }
 
     private static void SimulateAltPress()
